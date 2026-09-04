@@ -16,9 +16,7 @@ HCA_TEST = HCATestFactory()
 
 
 def test_hca_allocator_lifecycle_and_page_tables():
-    mesh, _, state_pool, request_pool, allocator = HCA_TEST.runtime(
-        requests=2, max_context_len=512
-    )
+    mesh, _, state_pool, request_pool, allocator = HCA_TEST.runtime(requests=2, max_context_len=512)
     requests = [HCA_TEST.request(), HCA_TEST.request()]
     with jax.set_mesh(mesh):
         req_indices = np.asarray(allocator.alloc(requests), np.int32)
@@ -38,10 +36,7 @@ def test_hca_allocator_lifecycle_and_page_tables():
         assert np.all(window_page_indices > 0)
         assert compressed_page_indices[0] > 0
         assert window_cu_kv_lens[-1] == window_page_indices.size * allocator.page_size
-        assert (
-            compressed_cu_kv_lens[-1]
-            == compressed_page_indices.size * allocator.page_size
-        )
+        assert compressed_cu_kv_lens[-1] == compressed_page_indices.size * allocator.page_size
 
         src = request_pool.get_linear_recurrent_indices(req_indices)
         state_pool.state_buffers[0] = (

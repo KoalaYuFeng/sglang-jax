@@ -20,6 +20,7 @@ import jax
 import jax.numpy as jnp
 import ml_dtypes
 import numpy as np
+
 from sgl_jax.srt.kernels.csa.csa import build_csa_step
 from sgl_jax.srt.kernels.csa.tune import (
     CSA_ATTENTION_DIM,
@@ -73,8 +74,7 @@ NANOSECONDS_PER_MILLISECOND = 1e6
 
 TC_PREFIX = "VF_CHIP_TC_TCS_TC_MISC_TCS_STATS_TCS_STATS_COUNTERS_UNPRIVILEGED_COUNT_"
 HBM_READ = re.compile(
-    r"^VF_CHIP_HBM_[01]_HBMC_\d+_CMN_HI_FREQ_STATS_COUNTERS_"
-    r"UNPRIVILEGED_RD_RESP_PS[01]$"
+    r"^VF_CHIP_HBM_[01]_HBMC_\d+_CMN_HI_FREQ_STATS_COUNTERS_" r"UNPRIVILEGED_RD_RESP_PS[01]$"
 )
 HBM_WRITE = re.compile(
     r"^VF_CHIP_HBM_[01]_HBMC_\d+_CMN_HI_FREQ_STATS_COUNTERS_"
@@ -164,26 +164,22 @@ def profile(call, *, iterations: int = PROFILE_ITERATIONS) -> Resources:
                 if value is not None:
                     counters[event.name] = counters.get(event.name, 0) + int(value)
     if not modules or len(modules) % iterations:
-        raise RuntimeError(
-            f"cannot group {len(modules)} XLA modules into {iterations} calls"
-        )
+        raise RuntimeError(f"cannot group {len(modules)} XLA modules into {iterations} calls")
     per_call = len(modules) // iterations
     groups = [modules[i : i + per_call] for i in range(0, len(modules), per_call)]
     active_ns = _union_duration((event.start_ns, event.end_ns) for event in modules)
     active_per_call = [sum(event.duration_ns for event in group) for group in groups]
     envelope_per_call = [group[-1].end_ns - group[0].start_ns for group in groups]
     cycles = active_ns * TPU_V6E_CLOCK_HZ / NANOSECONDS_PER_SECOND
-    mxu_busy = MXU_BUSY_ONE_CYCLE_WEIGHT * counters.get(
-        TC_PREFIX + "MXU_BUSY_1", 0
-    ) + counters.get(TC_PREFIX + "MXU_BUSY_2", 0)
+    mxu_busy = MXU_BUSY_ONE_CYCLE_WEIGHT * counters.get(TC_PREFIX + "MXU_BUSY_1", 0) + counters.get(
+        TC_PREFIX + "MXU_BUSY_2", 0
+    )
     vector_issued = sum(
         counters.get(TC_PREFIX + f"VECTOR_ALU_INSTRUCTION_{lane}", 0)
         for lane in range(VECTOR_COUNTER_COUNT)
     )
     hbm_bytes = HBM_COUNTER_BYTES * sum(
-        value
-        for name, value in counters.items()
-        if HBM_READ.match(name) or HBM_WRITE.match(name)
+        value for name, value in counters.items() if HBM_READ.match(name) or HBM_WRITE.match(name)
     )
     peak = (
         float(
@@ -201,24 +197,16 @@ def profile(call, *, iterations: int = PROFILE_ITERATIONS) -> Resources:
         op_durations[name] = op_durations.get(name, 0) + event.duration_ns
     operations = tuple(
         (name, duration / iterations / NANOSECONDS_PER_MILLISECOND)
-        for name, duration in sorted(
-            op_durations.items(), key=lambda item: item[1], reverse=True
-        )
+        for name, duration in sorted(op_durations.items(), key=lambda item: item[1], reverse=True)
     )
     return Resources(
-        device_active_ms=float(np.median(active_per_call))
-        / NANOSECONDS_PER_MILLISECOND,
-        device_envelope_ms=float(np.median(envelope_per_call))
-        / NANOSECONDS_PER_MILLISECOND,
+        device_active_ms=float(np.median(active_per_call)) / NANOSECONDS_PER_MILLISECOND,
+        device_envelope_ms=float(np.median(envelope_per_call)) / NANOSECONDS_PER_MILLISECOND,
         mxu_busy_pct=100.0 * mxu_busy / cycles if cycles else math.nan,
         vector_issue_pct=(
-            100.0 * vector_issued / (VECTOR_COUNTER_COUNT * cycles)
-            if cycles
-            else math.nan
+            100.0 * vector_issued / (VECTOR_COUNTER_COUNT * cycles) if cycles else math.nan
         ),
-        hbm_gb_s=(
-            hbm_bytes / active_s / NANOSECONDS_PER_SECOND if active_s else math.nan
-        ),
+        hbm_gb_s=(hbm_bytes / active_s / NANOSECONDS_PER_SECOND if active_s else math.nan),
         hbm_pct=100.0 * hbm_bytes / (peak * active_s) if active_s else math.nan,
         hbm_bytes_per_call=hbm_bytes / iterations,
         top_ops=operations[:5],
@@ -265,8 +253,7 @@ def _workload(pattern: str, batch: int) -> Workload:
         return Workload(
             pattern,
             tuple(
-                RAGGED_QUERY_LENGTHS[index % len(RAGGED_QUERY_LENGTHS)]
-                for index in range(batch)
+                RAGGED_QUERY_LENGTHS[index % len(RAGGED_QUERY_LENGTHS)] for index in range(batch)
             ),
             (1, 1, batch),
         )
@@ -286,17 +273,17 @@ def _unit_e8m0() -> np.uint8:
 def _main_caches(rng: np.random.Generator, pages: int):
     records = pages * CSA_DEFAULT_PAGE_SIZE
     nope = np.zeros((records, CSA_ATTENTION_DIM), np.uint8)
-    values = (
-        INPUT_CACHE_SCALE * rng.standard_normal((records, CSA_MAIN_NOPE_DIM))
-    ).astype(ml_dtypes.float8_e4m3fn)
+    values = (INPUT_CACHE_SCALE * rng.standard_normal((records, CSA_MAIN_NOPE_DIM))).astype(
+        ml_dtypes.float8_e4m3fn
+    )
     nope[:, : values.shape[1]] = values.view(np.uint8)
     nope[
         :,
         CSA_MAIN_NOPE_DIM : CSA_MAIN_NOPE_DIM + CSA_MAIN_NOPE_SCALE_COUNT,
     ] = _unit_e8m0()
-    rope = np.asarray(
-        jnp.asarray(rng.standard_normal((records, CSA_ROPE_DIM)), jnp.bfloat16)
-    ).view(np.uint16)
+    rope = np.asarray(jnp.asarray(rng.standard_normal((records, CSA_ROPE_DIM)), jnp.bfloat16)).view(
+        np.uint16
+    )
     rope_bytes = np.concatenate(
         ((rope >> 8).astype(np.uint8), (rope & 0xFF).astype(np.uint8)), axis=-1
     )
@@ -330,9 +317,7 @@ def _ordered_index_cache(pages: int, pages_per_request: int):
     for bit in range(encoded_bits):
         logical[:, bit] = ((logical_rows >> bit) & 1).astype(np.float32)
     fp8_records = np.zeros((records, CSA_INDEX_RECORD_BYTES), np.uint8)
-    fp8_records[:, :CSA_INDEX_DIM] = logical.astype(ml_dtypes.float8_e4m3fn).view(
-        np.uint8
-    )
+    fp8_records[:, :CSA_INDEX_DIM] = logical.astype(ml_dtypes.float8_e4m3fn).view(np.uint8)
     fp8_records[:, CSA_INDEX_DIM] = _unit_e8m0()
     return jnp.asarray(
         fp8_records.reshape(
@@ -349,9 +334,7 @@ def _metadata(workload: Workload, sequence: int):
     cu_q = np.asarray((0, *np.cumsum(q_lens)), np.int32)
     seq_ids = np.repeat(np.arange(workload.batch, dtype=np.int32), q_lens)
     prefixes = sequence - q_lens
-    positions = np.concatenate(
-        [np.arange(prefix, sequence, dtype=np.int32) for prefix in prefixes]
-    )
+    positions = np.concatenate([np.arange(prefix, sequence, dtype=np.int32) for prefix in prefixes])
 
     compressed_pages_per_request = (
         sequence // CSA_COMPRESSION_RATIO + CSA_DEFAULT_PAGE_SIZE - 1
@@ -360,13 +343,10 @@ def _metadata(workload: Workload, sequence: int):
         workload.batch * compressed_pages_per_request, dtype=np.int32
     ).reshape(workload.batch, compressed_pages_per_request)
 
-    raw_pages_per_request = (
-        sequence + CSA_DEFAULT_PAGE_SIZE - 1
-    ) // CSA_DEFAULT_PAGE_SIZE
+    raw_pages_per_request = (sequence + CSA_DEFAULT_PAGE_SIZE - 1) // CSA_DEFAULT_PAGE_SIZE
     raw_page_ids = np.arange(raw_pages_per_request, dtype=np.int32)[None, :]
     window_pages = (
-        WINDOW_CACHE_PAGES_PER_REQUEST
-        * np.arange(workload.batch, dtype=np.int32)[:, None]
+        WINDOW_CACHE_PAGES_PER_REQUEST * np.arange(workload.batch, dtype=np.int32)[:, None]
     )
     window_pages = window_pages + np.mod(raw_page_ids, WINDOW_CACHE_PAGES_PER_REQUEST)
     return (
@@ -389,30 +369,20 @@ def _operands(workload: Workload, sequence: int, seed: int):
         window_pages,
         distribution,
     ) = _metadata(workload, sequence)
-    x = jnp.asarray(
-        rng.standard_normal((workload.tokens, CSA_HIDDEN_DIM)), jnp.bfloat16
-    )
-    weight_np = INPUT_WEIGHT_SCALE * rng.standard_normal(
-        (CSA_HIDDEN_DIM, CSA_DUAL_PROJECTION_DIM)
-    )
+    x = jnp.asarray(rng.standard_normal((workload.tokens, CSA_HIDDEN_DIM)), jnp.bfloat16)
+    weight_np = INPUT_WEIGHT_SCALE * rng.standard_normal((CSA_HIDDEN_DIM, CSA_DUAL_PROJECTION_DIM))
     weight = jnp.asarray(weight_np, jnp.bfloat16)
     main_ape = jnp.asarray(
         INPUT_APE_SCALE
-        * rng.standard_normal(
-            (CSA_COMPRESSION_RATIO, CSA_MAIN_PROJECTED_DIM), dtype=np.float32
-        )
+        * rng.standard_normal((CSA_COMPRESSION_RATIO, CSA_MAIN_PROJECTED_DIM), dtype=np.float32)
     )
     index_ape = jnp.asarray(
         INPUT_APE_SCALE
-        * rng.standard_normal(
-            (CSA_COMPRESSION_RATIO, CSA_INDEX_PROJECTED_DIM), dtype=np.float32
-        )
+        * rng.standard_normal((CSA_COMPRESSION_RATIO, CSA_INDEX_PROJECTED_DIM), dtype=np.float32)
     )
     main_norm = jnp.ones((CSA_ATTENTION_DIM,), jnp.float32)
     index_norm = jnp.ones((CSA_INDEX_DIM,), jnp.float32)
-    angles = rng.standard_normal(
-        (sequence + 1, CSA_ROPE_FREQUENCY_DIM), dtype=np.float32
-    )
+    angles = rng.standard_normal((sequence + 1, CSA_ROPE_FREQUENCY_DIM), dtype=np.float32)
     cos = np.cos(angles).astype(np.float32)
     sin = np.sin(angles).astype(np.float32)
 
@@ -434,9 +404,7 @@ def _operands(workload: Workload, sequence: int, seed: int):
         jnp.bfloat16,
     )
 
-    logical_index_q = np.zeros(
-        (workload.tokens, CSA_INDEX_HEADS, CSA_INDEX_DIM), np.float32
-    )
+    logical_index_q = np.zeros((workload.tokens, CSA_INDEX_HEADS, CSA_INDEX_DIM), np.float32)
     index_weights_np = np.zeros((workload.tokens, CSA_INDEX_HEADS), np.float32)
     encoded_bits = min(
         (compressed_pages.shape[1] * CSA_DEFAULT_PAGE_SIZE - 1).bit_length(),
@@ -451,9 +419,7 @@ def _operands(workload: Workload, sequence: int, seed: int):
         rng.standard_normal((workload.tokens, CSA_ATTENTION_HEADS, CSA_ATTENTION_DIM)),
         jnp.bfloat16,
     )
-    new_kv = jnp.asarray(
-        rng.standard_normal((workload.tokens, CSA_ATTENTION_DIM)), jnp.bfloat16
-    )
+    new_kv = jnp.asarray(rng.standard_normal((workload.tokens, CSA_ATTENTION_DIM)), jnp.bfloat16)
     sink = jnp.asarray(rng.standard_normal((CSA_ATTENTION_HEADS,)), jnp.float32)
 
     return [
@@ -508,16 +474,14 @@ def _update_operands(values, result):
 
 def _build(workload: Workload, sequence: int):
     operands = [
-        _operands(workload, sequence, BENCHMARK_SEED + ring)
-        for ring in range(ROTATING_BUFFERS)
+        _operands(workload, sequence, BENCHMARK_SEED + ring) for ring in range(ROTATING_BUFFERS)
     ]
     return _StatefulCall(
         build_csa_step(
             workload.query_lengths,
             query_start_slots=tuple(
                 int(value)
-                for value in (sequence - np.asarray(workload.query_lengths))
-                % CSA_COMPRESSION_RATIO
+                for value in (sequence - np.asarray(workload.query_lengths)) % CSA_COMPRESSION_RATIO
             ),
             uniform_prefill=workload.pattern == "prefill",
         ),
@@ -562,9 +526,7 @@ def _print_summary(results: list[Benchmark]) -> None:
         print(f"{pattern}: S=" + " ".join(map(str, sequences)))
         for batch in dict.fromkeys(result.batch for result in pattern_results):
             row = [result for result in pattern_results if result.batch == batch]
-            print(
-                f"  B={batch}: " + " ".join(f"{result.mean_ms:.4f}" for result in row)
-            )
+            print(f"  B={batch}: " + " ".join(f"{result.mean_ms:.4f}" for result in row))
 
 
 def main():
@@ -584,9 +546,7 @@ def main():
             for sequence in map(int, args.sequences.split(",")):
                 sequence_alignment = CSA_DEFAULT_PAGE_SIZE * CSA_COMPRESSION_RATIO
                 if sequence < workload.maximum_query or sequence % sequence_alignment:
-                    raise ValueError(
-                        "sequence must cover q and align to a compressed page"
-                    )
+                    raise ValueError("sequence must cover q and align to a compressed page")
                 results.append(
                     _report(
                         workload,

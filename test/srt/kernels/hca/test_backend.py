@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 from jax.sharding import NamedSharding
 from jax.sharding import PartitionSpec as P
+
 from sgl_jax.srt.layers.attention.hca_backend import HCABackend
 from sgl_jax.srt.mem_cache.memory_pool import MemoryPools
 from sgl_jax.srt.model_executor.forward_batch_info import ForwardMode
@@ -33,9 +34,7 @@ def _worker_batch(
         seq_lens=np.asarray(seq_lens, np.int32),
         positions=np.asarray(positions, np.int32),
         extend_seq_lens=(None if q_lens is None else np.asarray(q_lens, np.int32)),
-        extend_prefix_lens=(
-            None if prefix_lens is None else np.asarray(prefix_lens, np.int32)
-        ),
+        extend_prefix_lens=(None if prefix_lens is None else np.asarray(prefix_lens, np.int32)),
         recurrent_indices=request_pool.get_linear_recurrent_indices(req_indices),
     )
 
@@ -121,9 +120,7 @@ def test_hca_decode_updates_state_and_both_cache_tiers():
     assert np.any(np.asarray(window) != 0)
     boundary = np.asarray(metadata.boundary_token_indices)
     tokens = int(metadata.valid_token_mask.shape[0])
-    assert boundary[boundary < tokens].tolist() == [
-        0
-    ]  # padded entries carry ``tokens``
+    assert boundary[boundary < tokens].tolist() == [0]  # padded entries carry ``tokens``
     assert np.any(np.asarray(compressed) != 0)
 
 
@@ -175,9 +172,7 @@ def _metadata_signature(
 def test_hca_forward_metadata_shapes_are_stable_across_drift():
     """Boundary-count, compressed-entry, and page-table drift must not change
     compiled metadata shapes; only the empty/non-empty boundary split may."""
-    mesh, _, _, request_pool, allocator = HCA_TEST.runtime(
-        requests=2, max_context_len=2048
-    )
+    mesh, _, _, request_pool, allocator = HCA_TEST.runtime(requests=2, max_context_len=2048)
     requests = [HCA_TEST.request(), HCA_TEST.request()]
     with jax.set_mesh(mesh):
         req_indices = np.asarray(allocator.alloc(requests), np.int32)
@@ -220,9 +215,7 @@ def test_hca_forward_metadata_shapes_are_stable_across_drift():
                 allocator,
                 req_indices,
                 ForwardMode.EXTEND,
-                np.concatenate(
-                    [np.arange(p, p + q) for p, q in zip(prefixes, (130, 64))]
-                ),
+                np.concatenate([np.arange(p, p + q) for p, q in zip(prefixes, (130, 64))]),
                 [130, 64],
                 prefixes,
             )
@@ -233,9 +226,7 @@ def test_hca_forward_metadata_shapes_are_stable_across_drift():
 
 def test_hca_uniform_fast_path_selection():
     """Zero-prefix equal-length prompts take the uniform path; ragged mixes do not."""
-    mesh, _, _, request_pool, allocator = HCA_TEST.runtime(
-        requests=2, max_context_len=512
-    )
+    mesh, _, _, request_pool, allocator = HCA_TEST.runtime(requests=2, max_context_len=512)
     requests = [HCA_TEST.request(), HCA_TEST.request()]
     with jax.set_mesh(mesh):
         req_indices = np.asarray(allocator.alloc(requests), np.int32)

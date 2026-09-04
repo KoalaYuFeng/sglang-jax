@@ -108,9 +108,7 @@ def compressor_ragged(
                 request_values.append(pooled[0])
         state[request] = request_state[0]
         emitted_positions.append(np.asarray(request_positions, np.int32))
-        emitted_values.append(
-            np.asarray(request_values, np.float32).reshape(-1, norm.shape[0])
-        )
+        emitted_values.append(np.asarray(request_values, np.float32).reshape(-1, norm.shape[0]))
         token_start += query_length
     return tuple(emitted_positions), tuple(emitted_values), state
 
@@ -129,9 +127,9 @@ def pack_main(pooled):
         scale = np.exp2(np.ceil(np.log2(amax / fp8_max))).astype(np.float32)
         values.append((block_values / scale).astype(ml_dtypes.float8_e4m3fn))
         scales.append(scale)
-    scale_bytes = (
-        np.concatenate(scales, axis=-1).view(np.uint32) >> np.uint32(23)
-    ).astype(np.uint8)
+    scale_bytes = (np.concatenate(scales, axis=-1).view(np.uint32) >> np.uint32(23)).astype(
+        np.uint8
+    )
     nope = np.concatenate(
         (
             np.concatenate(values, axis=-1).view(np.uint8),
@@ -179,9 +177,9 @@ def decode_main(nope, rope):
         .astype(np.float32)
     )
     nope_values = values * np.repeat(scales, FP8_BLOCK_SIZE, axis=-1)
-    bits = np.left_shift(rope[..., :ROPE_DIM].astype(np.uint16), 8) | rope[
-        ..., ROPE_DIM:
-    ].astype(np.uint16)
+    bits = np.left_shift(rope[..., :ROPE_DIM].astype(np.uint16), 8) | rope[..., ROPE_DIM:].astype(
+        np.uint16
+    )
     return np.concatenate(
         (nope_values, bits.view(ml_dtypes.bfloat16).astype(np.float32)),
         axis=-1,
@@ -191,9 +189,7 @@ def decode_main(nope, rope):
 def decode_index(records):
     values = records[..., :INDEX_DIM].view(ml_dtypes.float8_e4m3fn).astype(np.float32)
     scales = (
-        records[..., INDEX_DIM : INDEX_DIM + 1]
-        .view(ml_dtypes.float8_e8m0fnu)
-        .astype(np.float32)
+        records[..., INDEX_DIM : INDEX_DIM + 1].view(ml_dtypes.float8_e8m0fnu).astype(np.float32)
     )
     return values * scales
 
@@ -216,9 +212,7 @@ def lightning_topk(
     dots = np.einsum("thd,tkd->thk", queries, selected_keys)
     scores = np.einsum("thk,th->tk", np.maximum(dots, 0), weights)
     result = np.full((queries.shape[0], selected), -1, np.int32)
-    for token, (position, request) in enumerate(
-        zip(query_positions, query_seq_ids, strict=True)
-    ):
+    for token, (position, request) in enumerate(zip(query_positions, query_seq_ids, strict=True)):
         available = min(
             int(kv_lens[request]),
             (int(position) + 1) // COMPRESSION_RATIO,
@@ -240,9 +234,7 @@ def gather_paged(records, topk, page_indices, query_seq_ids, *, page_size=128):
             if logical < 0:
                 continue
             physical_page = page_indices[request, logical // page_size]
-            result[token, output_row] = records[
-                physical_page * page_size + logical % page_size
-            ]
+            result[token, output_row] = records[physical_page * page_size + logical % page_size]
     return result
 
 
@@ -261,9 +253,7 @@ def sliding_window(
     cache = np.asarray(cache).reshape(-1, cache.shape[-1])
     rows = np.zeros((len(positions), window_size, cache.shape[-1]), np.float32)
     valid = np.zeros((len(positions), window_size), np.bool_)
-    for token, (position, request) in enumerate(
-        zip(positions, query_seq_ids, strict=True)
-    ):
+    for token, (position, request) in enumerate(zip(positions, query_seq_ids, strict=True)):
         local_query = token - int(cu_q_lens[request])
         prefix = int(position) - local_query
         for column, key_position in enumerate(
@@ -295,9 +285,7 @@ def joint_attention(q, window, window_valid, selected, selected_valid, sink):
         maximum = np.maximum(scores.max(axis=-1), sink)
         probability = np.exp(scores - maximum[:, None])
         denominator = probability.sum(axis=-1) + np.exp(sink - maximum)
-        output[token] = (
-            np.einsum("hk,kd->hd", probability, values) / denominator[:, None]
-        )
+        output[token] = np.einsum("hk,kd->hd", probability, values) / denominator[:, None]
     return output
 
 

@@ -27,7 +27,6 @@ from sgl_jax.srt.kernels.csa.tune import (
 from sgl_jax.srt.kernels.ragged_paged_attention.util import get_dtype_packing
 from sgl_jax.srt.mem_cache.memory_pool import KVCache
 
-
 _TPU_UINT8_CACHE_LAYOUT = Layout(
     (0, 1, 2, 3),
     (

@@ -93,9 +93,7 @@ def compare(actual, expected) -> dict:
     expected = np.asarray(expected, np.float64)
     difference = np.abs(actual - expected)
     flat_a, flat_e = actual.ravel(), expected.ravel()
-    cosine = float(
-        (flat_a @ flat_e) / (np.linalg.norm(flat_a) * np.linalg.norm(flat_e) + 1e-30)
-    )
+    cosine = float((flat_a @ flat_e) / (np.linalg.norm(flat_a) * np.linalg.norm(flat_e) + 1e-30))
     return {
         "max_abs": float(difference.max()),
         "mean_abs": float(difference.mean()),

@@ -9,16 +9,16 @@ import jax.numpy as jnp
 from jax.sharding import PartitionSpec as P
 from jax.tree_util import register_pytree_node_class
 
+from sgl_jax.srt.kernels.hca.attention import (
+    ragged_attention,
+    uniform_prefill_attention,
+)
 from sgl_jax.srt.kernels.hca.compressor import (
     hca_project_fused_pallas,
     hca_state_pool_emit_pallas,
     hca_state_pool_update_fused_pallas,
     hca_state_pool_update_ragged_fused_pallas,
     token_compress_prefill_pallas,
-)
-from sgl_jax.srt.kernels.hca.attention import (
-    ragged_attention,
-    uniform_prefill_attention,
 )
 from sgl_jax.srt.kernels.hca.tuned_block_sizes import HCAKernelSchedule
 

@@ -8,6 +8,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+
 from sgl_jax.srt.kernels.csa.csa import build_csa_step
 from sgl_jax.srt.kernels.csa.csa_memory import CSAKVPool, CSARecurrentStatePool
 from sgl_jax.srt.kernels.csa.tune import (
@@ -58,13 +59,11 @@ def _validate_backend(mesh):
             compressed_entries = int(np.max(seq_lens)) // CSA_COMPRESSION_RATIO
             compressed_pages = max(
                 1,
-                (compressed_entries + CSA_DEFAULT_PAGE_SIZE - 1)
-                // CSA_DEFAULT_PAGE_SIZE,
+                (compressed_entries + CSA_DEFAULT_PAGE_SIZE - 1) // CSA_DEFAULT_PAGE_SIZE,
             )
             window_pages = max(
                 1,
-                (int(np.max(seq_lens)) + CSA_DEFAULT_PAGE_SIZE - 1)
-                // CSA_DEFAULT_PAGE_SIZE,
+                (int(np.max(seq_lens)) + CSA_DEFAULT_PAGE_SIZE - 1) // CSA_DEFAULT_PAGE_SIZE,
             )
             return (
                 np.ones((batch, compressed_pages), np.int32),
@@ -131,15 +130,9 @@ def _validate_backend(mesh):
             kv_pool,
             recurrent_state_pool=state_pool,
             compressor_input=jnp.ones((1, CSA_HIDDEN_DIM), jnp.bfloat16),
-            dual_weight=jnp.zeros(
-                (CSA_HIDDEN_DIM, CSA_DUAL_PROJECTION_DIM), jnp.bfloat16
-            ),
-            main_ape=jnp.zeros(
-                (CSA_COMPRESSION_RATIO, CSA_MAIN_PROJECTED_DIM), jnp.float32
-            ),
-            index_ape=jnp.zeros(
-                (CSA_COMPRESSION_RATIO, CSA_INDEX_PROJECTED_DIM), jnp.float32
-            ),
+            dual_weight=jnp.zeros((CSA_HIDDEN_DIM, CSA_DUAL_PROJECTION_DIM), jnp.bfloat16),
+            main_ape=jnp.zeros((CSA_COMPRESSION_RATIO, CSA_MAIN_PROJECTED_DIM), jnp.float32),
+            index_ape=jnp.zeros((CSA_COMPRESSION_RATIO, CSA_INDEX_PROJECTED_DIM), jnp.float32),
             main_norm=jnp.ones((CSA_ATTENTION_DIM,), jnp.float32),
             index_norm=jnp.ones((CSA_INDEX_DIM,), jnp.float32),
             cos=jnp.ones((sequence, CSA_ROPE_FREQUENCY_DIM), jnp.float32),
@@ -197,9 +190,7 @@ def _validate_complete_step(query_lengths, seq_lens, *, uniform_prefill, seed):
     for bit in range(encoded_bits):
         logical_index[:, :, bit] = (logical_rows >> bit) & 1
 
-    main_nope_rows = np.zeros(
-        (physical_pages * CSA_DEFAULT_PAGE_SIZE, CSA_ATTENTION_DIM), np.uint8
-    )
+    main_nope_rows = np.zeros((physical_pages * CSA_DEFAULT_PAGE_SIZE, CSA_ATTENTION_DIM), np.uint8)
     main_rope_rows = np.zeros(
         (physical_pages * CSA_DEFAULT_PAGE_SIZE, CSA_ROPE_RECORD_BYTES), np.uint8
     )
@@ -263,9 +254,7 @@ def _validate_complete_step(query_lengths, seq_lens, *, uniform_prefill, seed):
         index_weights[:, bit] = 1 << bit
     attention_query = np.asarray(
         jnp.asarray(
-            rng.standard_normal(
-                (tokens, CSA_INDEX_HEADS, CSA_ATTENTION_DIM), dtype=np.float32
-            ),
+            rng.standard_normal((tokens, CSA_INDEX_HEADS, CSA_ATTENTION_DIM), dtype=np.float32),
             jnp.bfloat16,
         )
     )
@@ -288,18 +277,16 @@ def _validate_complete_step(query_lengths, seq_lens, *, uniform_prefill, seed):
         positions,
         query_lengths,
     )
-    index_emitted_positions, index_emitted, expected_index_state = (
-        ref.compressor_ragged(
-            compressor_input,
-            index_state,
-            dual_weight[:, 2 * CSA_MAIN_PROJECTED_DIM :],
-            index_ape,
-            index_norm,
-            cos,
-            sin,
-            positions,
-            query_lengths,
-        )
+    index_emitted_positions, index_emitted, expected_index_state = ref.compressor_ragged(
+        compressor_input,
+        index_state,
+        dual_weight[:, 2 * CSA_MAIN_PROJECTED_DIM :],
+        index_ape,
+        index_norm,
+        cos,
+        sin,
+        positions,
+        query_lengths,
     )
     expected_nope = main_nope_rows.copy()
     expected_rope = main_rope_rows.copy()
@@ -382,9 +369,7 @@ def _validate_complete_step(query_lengths, seq_lens, *, uniform_prefill, seed):
     )
     step = build_csa_step(
         query_lengths,
-        query_start_slots=tuple(
-            int(value) for value in prefixes % CSA_COMPRESSION_RATIO
-        ),
+        query_start_slots=tuple(int(value) for value in prefixes % CSA_COMPRESSION_RATIO),
         uniform_prefill=uniform_prefill,
     )
     actual = step(
@@ -462,13 +447,9 @@ def _validate_complete_step(query_lengths, seq_lens, *, uniform_prefill, seed):
         np.asarray(actual_index).reshape(expected_index.shape), expected_index
     )
     expected_window = window_cache.copy()
-    for token, (position, request) in enumerate(
-        zip(positions, query_seq_ids, strict=True)
-    ):
+    for token, (position, request) in enumerate(zip(positions, query_seq_ids, strict=True)):
         physical_page = window_pages[request, position // CSA_DEFAULT_PAGE_SIZE]
-        physical = (
-            physical_page * CSA_DEFAULT_PAGE_SIZE + position % CSA_DEFAULT_PAGE_SIZE
-        )
+        physical = physical_page * CSA_DEFAULT_PAGE_SIZE + position % CSA_DEFAULT_PAGE_SIZE
         expected_window.reshape(-1, CSA_ATTENTION_DIM)[physical] = new_kv[token]
     np.testing.assert_array_equal(np.asarray(actual_window), expected_window)
 

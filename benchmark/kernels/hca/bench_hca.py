@@ -38,6 +38,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax.sharding import NamedSharding
 from jax.sharding import PartitionSpec as P
+
 from sgl_jax.srt.layers.attention.hca_backend import HCABackend
 from sgl_jax.srt.mem_cache.hca_allocator import HCAKVPoolAllocator
 from sgl_jax.srt.mem_cache.hca_pool import HCAKVPool, HCARecurrentStatePool
@@ -88,9 +89,7 @@ def make_inputs(q_lens, prefix_lens, *, seed: int) -> dict:
         "norm_weight": normal(6, (HEAD_DIM,)),
         "cos": jnp.cos(angle),
         "sin": jnp.sin(angle),
-        "window_cache": jnp.where(
-            live[..., None], normal(8, (batch, WINDOW, HEAD_DIM)), 0
-        ),
+        "window_cache": jnp.where(live[..., None], normal(8, (batch, WINDOW, HEAD_DIM)), 0),
         "compressed_cache": jnp.where(fresh, normal(9, (batch, entries, HEAD_DIM)), 0),
         "kv_state": jnp.where(
             live[..., None], normal(10, (batch, WINDOW, HEAD_DIM), jnp.float32), 0.0
@@ -131,7 +130,9 @@ def prepare(data: dict, *, decode: bool, page_size: int = 128):
         ("data", "tensor"),
         axis_types=(jax.sharding.AxisType.Explicit, jax.sharding.AxisType.Explicit),
     )
-    put = lambda value, spec: jax.device_put(value, NamedSharding(mesh, spec))
+
+    def put(value, spec):
+        return jax.device_put(value, NamedSharding(mesh, spec))
 
     with jax.set_mesh(mesh):
         state_pool = HCARecurrentStatePool([0], batch, mesh)
@@ -145,9 +146,7 @@ def prepare(data: dict, *, decode: bool, page_size: int = 128):
             max_context_len=max_context_len,
             layer_ids=[0],
         )
-        request_pool = HybridReqToTokenPool(
-            batch, max_context_len, np.int32, state_pool, dp_size=1
-        )
+        request_pool = HybridReqToTokenPool(batch, max_context_len, np.int32, state_pool, dp_size=1)
         allocator = HCAKVPoolAllocator(kv_pool, request_pool)
         req_indices = np.asarray(
             allocator.alloc(
@@ -361,9 +360,7 @@ def resources(call, *, iterations: int) -> tuple[float, float, float]:
     mxu = 0.5 * counters.get(TC_PREFIX + "MXU_BUSY_1", 0) + counters.get(
         TC_PREFIX + "MXU_BUSY_2", 0
     )
-    hbm = 32 * sum(
-        v for k, v in counters.items() if HBM_READ.match(k) or HBM_WRITE.match(k)
-    )
+    hbm = 32 * sum(v for k, v in counters.items() if HBM_READ.match(k) or HBM_WRITE.match(k))
     peak = float(stats.get("peak_hbm_bw_gigabytes_per_second", 0.0)) * 1e9
     return (
         100.0 * mxu / cycles if cycles else math.nan,
@@ -428,9 +425,7 @@ def run_benchmark_grid(
                         f"{latency:10.4f} | {tokens * 1e3 / latency:11.0f}"
                     )
                     if profile:
-                        mxu, hbm_pct, hbm_gbs = resources(
-                            call, iterations=profile_iterations
-                        )
+                        mxu, hbm_pct, hbm_gbs = resources(call, iterations=profile_iterations)
                         row += f" | {mxu:6.1f}% | {hbm_pct:8.1f}% | {hbm_gbs:9.1f}"
                     print(row, flush=True)
                     del call
@@ -447,12 +442,8 @@ def run_benchmark_grid(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Benchmark native stateful HCA")
-    parser.add_argument(
-        "--modes", default=",".join(MODES), help=f"subset of {','.join(MODES)}"
-    )
-    parser.add_argument(
-        "--batch-sizes", default="1,4,8,32", help="Comma-separated batch sizes"
-    )
+    parser.add_argument("--modes", default=",".join(MODES), help=f"subset of {','.join(MODES)}")
+    parser.add_argument("--batch-sizes", default="1,4,8,32", help="Comma-separated batch sizes")
     parser.add_argument(
         "--seq-lens",
         default="128,512,2048,8192",

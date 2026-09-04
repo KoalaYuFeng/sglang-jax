@@ -9,6 +9,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax.sharding import NamedSharding
 from jax.sharding import PartitionSpec as P
+
 from sgl_jax.srt.mem_cache.hca_allocator import HCAKVPoolAllocator
 from sgl_jax.srt.mem_cache.hca_pool import HCAKVPool, HCARecurrentStatePool
 from sgl_jax.srt.mem_cache.memory_pool import HybridReqToTokenPool
@@ -69,13 +70,9 @@ class HCATestFactory:
         def put(value, spec):
             return jax.device_put(value, NamedSharding(mesh, spec))
 
-        hidden = put(
-            jax.random.normal(key, (tokens, 4096), jnp.bfloat16), P("data", None)
-        )
+        hidden = put(jax.random.normal(key, (tokens, 4096), jnp.bfloat16), P("data", None))
         q = put(
-            jax.random.normal(
-                jax.random.fold_in(key, 1), (tokens, 64, 512), jnp.bfloat16
-            ),
+            jax.random.normal(jax.random.fold_in(key, 1), (tokens, 64, 512), jnp.bfloat16),
             P("data", "tensor", None),
         )
         new_kv = put(
@@ -98,9 +95,7 @@ class HCATestFactory:
         # Cover every absolute position the batch can reach; rows 0..511 stay
         # identical to the previous fixed-size table.
         rope_rows = max(512, tokens)
-        angle = (
-            jnp.arange(rope_rows * 32, dtype=jnp.float32).reshape(rope_rows, 32) * 1e-3
-        )
+        angle = jnp.arange(rope_rows * 32, dtype=jnp.float32).reshape(rope_rows, 32) * 1e-3
         cos = put(jnp.cos(angle), P(None, None))
         sin = put(jnp.sin(angle), P(None, None))
         sink = put(jnp.zeros((64,), jnp.float32), P("tensor"))

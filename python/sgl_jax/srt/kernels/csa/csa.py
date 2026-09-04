@@ -6,13 +6,17 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from sgl_jax.srt.kernels.csa.joint_attention import (
-    blocked_ragged_joint_attention_pallas,
-    joint_attention_pallas,
-)
 from sgl_jax.srt.kernels.csa.compressor import (
     csa_dual_state_step_cache,
     csa_dual_uniform_prefill_pallas,
+)
+from sgl_jax.srt.kernels.csa.indexer import (
+    paged_lightning_topk,
+    paged_sparsecore_gather_packed,
+)
+from sgl_jax.srt.kernels.csa.joint_attention import (
+    blocked_ragged_joint_attention_pallas,
+    joint_attention_pallas,
 )
 from sgl_jax.srt.kernels.csa.tune import (
     CSA_ATTENTION_DIM,
@@ -27,10 +31,6 @@ from sgl_jax.srt.kernels.csa.tune import (
     csa_topk_is_identity,
     get_csa_attention_schedule,
     get_csa_indexer_schedule,
-)
-from sgl_jax.srt.kernels.csa.indexer import (
-    paged_lightning_topk,
-    paged_sparsecore_gather_packed,
 )
 
 

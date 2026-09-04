@@ -11,12 +11,9 @@ from flax import nnx
 from jax.sharding import NamedSharding
 from jax.sharding import PartitionSpec as P
 from jax.tree_util import register_pytree_node_class
+
 from sgl_jax.srt.kernels.hca.attention import INERT_QUERY_OFFSET
-from sgl_jax.srt.kernels.hca.hca import (
-    HCAMetadata,
-    fused_projection_weight,
-    hca_step,
-)
+from sgl_jax.srt.kernels.hca.hca import HCAMetadata, fused_projection_weight, hca_step
 from sgl_jax.srt.kernels.hca.tuned_block_sizes import (
     HCAKernelSchedule,
     get_hca_kernel_schedule,
@@ -77,9 +74,11 @@ def _query_schedule(cu_q_lens: np.ndarray, query_block_size: int):
     request_ids = np.repeat(np.arange(q_lens.size, dtype=np.int32), block_counts)
     offsets = np.concatenate(
         [
-            np.arange(0, int(q_len), query_block_size, dtype=np.int32)
-            if q_len != 1
-            else np.empty((0,), np.int32)
+            (
+                np.arange(0, int(q_len), query_block_size, dtype=np.int32)
+                if q_len != 1
+                else np.empty((0,), np.int32)
+            )
             for q_len in q_lens
         ]
     )

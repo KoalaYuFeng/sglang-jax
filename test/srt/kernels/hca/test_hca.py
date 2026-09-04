@@ -22,6 +22,7 @@ import numpy as np
 import pytest
 from jax.sharding import NamedSharding
 from jax.sharding import PartitionSpec as P
+
 from sgl_jax.srt.layers.attention.hca_backend import HCABackend
 from sgl_jax.srt.mem_cache.memory_pool import MemoryPools
 from sgl_jax.srt.model_executor.forward_batch_info import ForwardMode
@@ -108,9 +109,7 @@ class _Driver:
             }
 
     def _put(self, value, spec, dtype):
-        return jax.device_put(
-            jax.numpy.asarray(value, dtype), NamedSharding(self.mesh, spec)
-        )
+        return jax.device_put(jax.numpy.asarray(value, dtype), NamedSharding(self.mesh, spec))
 
     def step(self, stream, mode, plan, seq_lens, q_lens, prefix_lens):
         """Run one step for ``plan`` = [(request, positions), ...]."""
@@ -128,13 +127,9 @@ class _Driver:
                     req_pool_indices=self.req_indices,
                     seq_lens=seq_lens,
                     positions=positions,
-                    extend_seq_lens=None
-                    if q_lens is None
-                    else np.asarray(q_lens, np.int32),
+                    extend_seq_lens=None if q_lens is None else np.asarray(q_lens, np.int32),
                     extend_prefix_lens=(
-                        None
-                        if prefix_lens is None
-                        else np.asarray(prefix_lens, np.int32)
+                        None if prefix_lens is None else np.asarray(prefix_lens, np.int32)
                     ),
                     recurrent_indices=self.request_pool.get_linear_recurrent_indices(
                         self.req_indices
@@ -148,9 +143,7 @@ class _Driver:
                 SimpleNamespace(layer_id=0, scaling=SOFTMAX_SCALE),
                 SimpleNamespace(
                     forward_mode=mode,
-                    positions=jax.device_put(
-                        positions, NamedSharding(self.mesh, P("data"))
-                    ),
+                    positions=jax.device_put(positions, NamedSharding(self.mesh, P("data"))),
                 ),
                 self.kv_pool,
                 recurrent_state_pool=self.state_pool,
@@ -172,10 +165,7 @@ class _Driver:
 
 def _check(actual, stream, plan, weights):
     expected = np.concatenate(
-        [
-            oracle.request_outputs(stream, r, list(p), weights, SOFTMAX_SCALE)
-            for r, p in plan
-        ]
+        [oracle.request_outputs(stream, r, list(p), weights, SOFTMAX_SCALE) for r, p in plan]
     )
     metrics = oracle.compare(actual, expected)
     assert metrics["nan"] == 0 and metrics["inf"] == 0, metrics
@@ -225,9 +215,7 @@ def test_hca_decode_chain_matches_reference():
     for step in range(steps):
         position = prefill + step
         plan = [(r, [position]) for r in range(batch)]
-        output = driver.step(
-            stream, ForwardMode.DECODE, plan, [position + 1] * batch, None, None
-        )
+        output = driver.step(stream, ForwardMode.DECODE, plan, [position + 1] * batch, None, None)
         _check(output, stream, plan, weights)
 
 
