@@ -12,6 +12,7 @@ from jax.sharding import NamedSharding
 from jax.sharding import PartitionSpec as P
 from jax.tree_util import register_pytree_node_class
 
+from sgl_jax.srt.kernels.csa.sharding import validate_csa_mesh
 from sgl_jax.srt.kernels.csa.tune import (
     CSA_ATTENTION_DIM,
     CSA_CACHE_PACKING,
@@ -62,8 +63,7 @@ class CSARecurrentStatePool:
             raise ValueError("CSA layer ids must be nonempty and unique")
         if size <= 0:
             raise ValueError("CSA recurrent size must be positive")
-        if mesh.size != 1:
-            raise ValueError("CSA memory currently supports one TPU device")
+        validate_csa_mesh(mesh)
 
         self.linear_recurrent_layer_ids = layer_ids
         self.layers_mapping = {layer_id: index for index, layer_id in enumerate(layer_ids)}
@@ -224,8 +224,7 @@ class CSAKVPool(KVCache):
             raise ValueError("CSA token capacity must be positive")
         if max_num_requests <= 0:
             raise ValueError("request capacity must be positive")
-        if mesh.size != 1:
-            raise ValueError("CSA memory currently supports one TPU device")
+        validate_csa_mesh(mesh)
 
         self.max_num_requests = max_num_requests
         self.max_context_len = max_context_len

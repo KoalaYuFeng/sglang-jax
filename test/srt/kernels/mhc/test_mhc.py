@@ -48,6 +48,15 @@ TOKENS = [128, 256, 512, 1024, 2048, 4096, 8192]
 RAGGED_TOKENS = [1, 127, 1000]
 
 
+@pytest.fixture(autouse=True)
+def single_device_mesh():
+    # Other test modules install global Explicit meshes during collection.
+    # These are rank-local kernels; do not inherit their tensor partitioning.
+    mesh = jax.sharding.Mesh(np.asarray(jax.devices()[:1], object), ("tensor",))
+    with jax.set_mesh(mesh):
+        yield
+
+
 def _inputs(n, hc=HC, hidden=HIDDEN, seed=0):
     keys = jax.random.split(jax.random.PRNGKey(seed), 6)
     mix_hc = ref.mix_hc_width(hc)

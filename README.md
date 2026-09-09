@@ -75,6 +75,10 @@ For multimodal model usage, see the [Usage Guide](docs/multimodal/multimodal_usa
 
 For detailed performance evaluation and to run the benchmarks yourself, please see the scripts located in the `benchmark/` and `python/sgl_jax/` directories (e.g., `bench_serving.py`).
 
+The experimental [DeepSeek-V4-Flash v5p integration and experiment ledger](docs/developer_guide/deepseek_v4_flash_experiments.md)
+records explicit execution settings, numerical gates and comparable ModelWorker results.
+These measurements are not a production-serving or official-accuracy certification.
+
 ## Testing
 
 The project includes a comprehensive test suite to ensure correctness and stability. To run the full suite of tests:

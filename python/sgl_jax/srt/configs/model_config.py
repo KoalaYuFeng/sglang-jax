@@ -365,6 +365,24 @@ class ModelConfig:
         Returns:
             Unified QuantizationConfig object or None
         """
+        if getattr(self.hf_config, "model_type", None) == "deepseek_v4":
+            if self.quantization_config is not None or self.quantization is not None:
+                raise ValueError(
+                    "V4 requires checkpoint-native mixed FP4/FP8, not quantization overrides"
+                )
+            hf_quant = self._get_hf_quant_config()
+            if (
+                not isinstance(hf_quant, dict)
+                or hf_quant.get("quant_method") != "fp8"
+                or hf_quant.get("scale_fmt") != "ue8m0"
+                or hf_quant.get("weight_block_size") != [128, 128]
+                or getattr(self.hf_config, "expert_dtype", None) != "fp4"
+            ):
+                raise ValueError("unsupported V4 checkpoint quantization format")
+            # Preserve HF metadata; the model's loader handles heterogeneous
+            # FP4 experts / FP8 linears and compact E8M0 scales itself.
+            return None
+
         # 1. If user provided a config path, use it (already loaded in __init__)
         if self.quantization_config is not None:
             logger.info("Using user-provided quantization config")

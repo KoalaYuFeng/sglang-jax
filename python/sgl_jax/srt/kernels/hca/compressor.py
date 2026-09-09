@@ -15,6 +15,7 @@ import jax.numpy as jnp
 from jax.experimental.pallas import tpu as pltpu
 
 from sgl_jax.srt.kernels.hca.tuned_block_sizes import HCAKernelSchedule
+from sgl_jax.srt.kernels.low_bit.formats import round_bf16
 
 
 def _interpret_pallas() -> bool:
@@ -34,7 +35,9 @@ def _projection_tile_k(hidden: int, schedule: HCAKernelSchedule) -> int:
     return tile_k
 
 
-def _pool_normalize_rotate(kv, score, norm_weight, cos, sin, *, norm_eps: float):
+def _pool_normalize_rotate(
+    kv, score, norm_weight, cos, sin, *, norm_eps: float, numerical_mode="legacy"
+):
     """Turn one 128-row group per entry into an HCA record.
 
     Softmax-pool ``kv`` with per-feature weights from ``score`` (axis 1 is the
@@ -46,9 +49,29 @@ def _pool_normalize_rotate(kv, score, norm_weight, cos, sin, *, norm_eps: float)
     """
     entries = kv.shape[0]
     head_dim = kv.shape[2] * kv.shape[3]
-    pooled = jnp.sum(kv * jax.nn.softmax(score, axis=1), axis=1)
-    pooled *= jax.lax.rsqrt(jnp.mean(jnp.square(pooled), axis=(1, 2), keepdims=True) + norm_eps)
-    pooled = (pooled * norm_weight).reshape(entries, head_dim)
+    if numerical_mode == "v4":
+        # Preserve the model's [entry, time, channel] reduction layout. A
+        # [entry, time, 4, 128] view puts time outside the two tiled axes and
+        # changes the FP32 softmax/pooling reduction order on v5p.
+        values = kv.reshape(entries, 128, head_dim)
+        scores = score.reshape(entries, 128, head_dim)
+        pooled = jnp.sum(values * jax.nn.softmax(scores, axis=1), axis=1)
+    else:
+        pooled = jnp.sum(kv * jax.nn.softmax(score, axis=1), axis=1)
+    if numerical_mode == "v4":
+        # V4 checkpoints pool into BF16 *before* RMS normalization. Keep this
+        # optional: the original template's FP32 pooled-value contract remains
+        # the default for existing HCA callers.
+        pooled = round_bf16(pooled).astype(jnp.float32).reshape(entries, head_dim)
+        squared = pooled * pooled
+        while squared.shape[-1] > 1:
+            pairs = squared.reshape(entries, -1, 2)
+            squared = pairs[..., 0] + pairs[..., 1]
+        inverse = jax.lax.rsqrt(squared / jnp.float32(head_dim) + norm_eps)
+        pooled = round_bf16(pooled * inverse * norm_weight.reshape(1, head_dim)).astype(jnp.float32)
+    else:
+        pooled *= jax.lax.rsqrt(jnp.mean(jnp.square(pooled), axis=(1, 2), keepdims=True) + norm_eps)
+        pooled = (pooled * norm_weight).reshape(entries, head_dim)
 
     rope = pooled[:, head_dim - 64 :]
     pairs = rope.reshape(entries, 32, 2)
@@ -376,13 +399,15 @@ def hca_state_pool_update_fused_pallas(
     )
 
 
-def _hca_emit_values(selected, valid, norm_weight, cos_sin, *, norm_eps: float):
+def _hca_emit_values(
+    selected, valid, norm_weight, cos_sin, *, norm_eps: float, numerical_mode="legacy"
+):
     """Mask invalid rows, then pool/normalize/rotate the selected state."""
     tile_n, _, _, head_tiles, lanes = selected.shape
     live = valid[:, None, None, None]
     kv = jnp.where(live, selected[:, :, 0, ...].astype(jnp.float32), 0.0)
     score = jnp.where(live, selected[:, :, 1, ...].astype(jnp.float32), -jnp.inf)
-    cos_sin = cos_sin.astype(jnp.float32)
+    cos_sin = cos_sin.astype(jnp.float32).reshape(tile_n, -1)
     normed = _pool_normalize_rotate(
         kv,
         score,
@@ -390,6 +415,7 @@ def _hca_emit_values(selected, valid, norm_weight, cos_sin, *, norm_eps: float):
         cos_sin[:, :32],
         cos_sin[:, 32:64],
         norm_eps=norm_eps,
+        numerical_mode=numerical_mode,
     ).reshape(tile_n, head_tiles, lanes)
     return jnp.where(valid[:, None, None], normed, 0.0).astype(jnp.bfloat16)
 
@@ -455,6 +481,7 @@ def _hca_emit_selected_kernel(
     output_ref,
     *,
     norm_eps: float,
+    numerical_mode: str,
 ):
     """Emit from boundary snapshots that are already contiguous."""
     output_ref[...] = _hca_emit_values(
@@ -463,6 +490,7 @@ def _hca_emit_selected_kernel(
         norm_weight_ref[...],
         cos_sin_ref[...],
         norm_eps=norm_eps,
+        numerical_mode=numerical_mode,
     )
 
 
@@ -486,7 +514,7 @@ def _boundary_launch(packed, valid_mask, cos_sin, schedule):
     return tile_n, padded, pad, valid_mask, valid_storage, jnp.pad(cos_sin, ((0, pad), (0, 64)))
 
 
-@functools.partial(jax.jit, static_argnames=("norm_eps", "schedule"))
+@functools.partial(jax.jit, static_argnames=("norm_eps", "schedule", "numerical_mode"))
 def _hca_emit_selected_pallas(
     selected,
     valid_mask,
@@ -495,15 +523,25 @@ def _hca_emit_selected_pallas(
     *,
     schedule: HCAKernelSchedule,
     norm_eps: float,
+    numerical_mode="legacy",
 ):
+    if numerical_mode not in ("legacy", "v4"):
+        raise ValueError("HCA numerical_mode must be legacy or v4")
     packed = selected.shape[0]
     tile_n, padded, pad, _, valid_storage, cos_sin_selected = _boundary_launch(
         packed, valid_mask, cos_sin_selected, schedule
     )
     selected = jnp.pad(selected, ((0, pad), (0, 0), (0, 0), (0, 0)))
     selected = selected.reshape(padded, 128, 2, 4, 128)
+    if numerical_mode == "v4":
+        # Keep four-entry v5p tiles legal for large boundary batches: the
+        # singleton row dimension is entire, rather than slicing a [P,128]
+        # minor dimension into an unaligned four-row block.
+        cos_sin_selected = cos_sin_selected.reshape(padded, 1, 128)
     output = pl.pallas_call(
-        functools.partial(_hca_emit_selected_kernel, norm_eps=float(norm_eps)),
+        functools.partial(
+            _hca_emit_selected_kernel, norm_eps=float(norm_eps), numerical_mode=numerical_mode
+        ),
         grid_spec=pltpu.PrefetchScalarGridSpec(
             num_scalar_prefetch=0,
             grid=(padded // tile_n,),
@@ -514,7 +552,9 @@ def _hca_emit_selected_pallas(
                 ),
                 pl.BlockSpec((tile_n, 8, 128), lambda block: (block, 0, 0)),
                 pl.BlockSpec((4, 128), lambda block: (0, 0)),
-                pl.BlockSpec((tile_n, 128), lambda block: (block, 0)),
+                pl.BlockSpec((tile_n, 1, 128), lambda block: (block, 0, 0))
+                if numerical_mode == "v4"
+                else pl.BlockSpec((tile_n, 128), lambda block: (block, 0)),
             ),
             out_specs=pl.BlockSpec((tile_n, 4, 128), lambda block: (block, 0, 0)),
         ),
@@ -523,7 +563,8 @@ def _hca_emit_selected_pallas(
             dimension_semantics=("parallel",), disable_bounds_checks=True
         ),
         interpret=_interpret_pallas(),
-        name=f"hca-boundary-snapshot-n{tile_n}-r128-d512",
+        name=f"hca-boundary-snapshot-n{tile_n}-r128-d512"
+        + ("-v4" if numerical_mode == "v4" else ""),
     )(
         selected,
         valid_storage,

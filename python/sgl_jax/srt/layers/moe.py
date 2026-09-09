@@ -12,6 +12,7 @@ from jax.sharding import PartitionSpec as P
 
 from sgl_jax.srt.eplb.expert_location import get_global_expert_location_metadata
 from sgl_jax.srt.kernels.gmm.megablox_gmm_backend import gmm
+from sgl_jax.srt.kernels.gmm.routing import expert_permutation
 
 # Re-export for backward compatibility: external code imports from this module.
 from sgl_jax.srt.layers.fused_moe import FusedEPMoE, FusedEPMoEV2  # noqa: F401
@@ -780,14 +781,11 @@ class EPMoE(nnx.Module):
                 f"got shape {inputs.shape}"
             )
 
-        flatten_selected_experts = jnp.ravel(top_k_indices)
-        sorted_selected_experts = jnp.argsort(flatten_selected_experts, stable=True)
+        sorted_selected_experts, group_sizes = expert_permutation(top_k_indices, self.num_experts)
         # token_indices: maps each sorted position to the original token index.
         # Pass to _gmm_compute so the gather happens there (indexed_gmm pattern),
         # avoiding a full [M*top_k, D] materialization in _permute.
         token_indices = sorted_selected_experts // self.num_experts_per_tok
-
-        group_sizes = jnp.bincount(flatten_selected_experts, length=self.num_experts)
 
         return (
             inputs,

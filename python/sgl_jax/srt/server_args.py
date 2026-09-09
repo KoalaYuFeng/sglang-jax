@@ -1511,6 +1511,7 @@ class ServerArgs:
                 "fa",
                 "fa_mha",
                 "dsa_sparse",
+                "deepseek_v4",
             ],
             default=ServerArgs.attention_backend,
             help=(

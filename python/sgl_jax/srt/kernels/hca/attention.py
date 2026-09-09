@@ -18,6 +18,7 @@ from jax.experimental.pallas import tpu as pltpu
 from jax.sharding import PartitionSpec as P
 
 from sgl_jax.srt.kernels.hca.tuned_block_sizes import HCAKernelSchedule
+from sgl_jax.srt.kernels.low_bit.formats import round_bf16
 
 
 def _align(value: int, multiple: int) -> int:
@@ -246,6 +247,27 @@ def _write_cache_rows(cache, locations, values, valid, *, schedule: HCAKernelSch
     )(locations, valid, values, cache)
 
 
+def _v4_probability_sum_64(probabilities):
+    """FP32 order of V4's retained MXU-produced 64-key reduction on v5p.
+
+    Within each 32-key half, first accumulate four eight-key stripes in
+    order, then halve the remaining eight lanes. Add the two halves last.
+    A generic Mosaic reduce uses another tree and can flip BF16 attention
+    rounding even when scores, probabilities and the PV product are exact.
+    This is the attention producer's layout, not a generic HBM sum contract.
+    Keep this opt-in: legacy HCA retains its original reduction.
+    """
+    if probabilities.shape[-1] != 64:
+        raise ValueError("V4 HCA probability reduction requires 64 keys")
+    stripes = probabilities.reshape(probabilities.shape[0], 2, 4, 8)
+    value = stripes[:, :, 0] + stripes[:, :, 1]
+    value = value + stripes[:, :, 2]
+    value = value + stripes[:, :, 3]
+    for width in (4, 2, 1):
+        value = value[..., :width] + value[..., width : 2 * width]
+    return (value[:, 0, 0] + value[:, 1, 0])[:, None]
+
+
 def _streaming_attention_kernel(
     compressed_page_indices_ref,
     compressed_page_starts_ref,
@@ -257,6 +279,7 @@ def _streaming_attention_kernel(
     attention_sink_ref,
     out_ref,
     compressed_kv_x2_ref,
+    compressed_lanes_x2_ref,
     dma_semaphores,
     m_ref,
     l_ref,
@@ -267,6 +290,7 @@ def _streaming_attention_kernel(
     tile_k: int,
     compressed_tile: int,
     softmax_scale: float,
+    numerical_mode: str,
 ):
     """One FlashAttention-style program over SWA then compressed HCA tiles."""
     head_dim = q_ref.shape[2]
@@ -274,7 +298,7 @@ def _streaming_attention_kernel(
     sink = attention_sink_ref[...].astype(jnp.float32)[:, None]
     # Compute SWA without the virtual sink, round its unnormalised numerator to BF16
     # at the SWA/compressed-cache boundary, and add the sink to the final denominator.
-    negative_finite = jnp.finfo(jnp.float32).min
+    negative_finite = -1e30 if numerical_mode == "v4" else jnp.finfo(jnp.float32).min
     m_ref[...] = jnp.full(m_ref.shape, negative_finite, jnp.float32)
     l_ref[...] = jnp.zeros(l_ref.shape, jnp.float32)
     acc_ref[...] = jnp.zeros(acc_ref.shape, jnp.float32)
@@ -292,9 +316,16 @@ def _streaming_attention_kernel(
         next_maximum = jnp.maximum(previous_maximum, block_maximum)
         alpha = jnp.exp(previous_maximum - next_maximum)
         probabilities = jnp.exp(scores - next_maximum)
-        next_denominator = alpha * l_ref[...][:, :1] + jnp.sum(probabilities, axis=1, keepdims=True)
+        if numerical_mode == "v4":
+            probabilities = jnp.where(valid[None, :], probabilities, 0.0)
+        probability_sum = (
+            _v4_probability_sum_64(probabilities)
+            if numerical_mode == "v4"
+            else jnp.sum(probabilities, axis=1, keepdims=True)
+        )
+        next_denominator = alpha * l_ref[...][:, :1] + probability_sum
         value = jax.lax.dot_general(
-            probabilities,
+            round_bf16(probabilities) if numerical_mode == "v4" else probabilities,
             kv.astype(jnp.bfloat16),
             (((1,), (0,)), ((), ())),
             preferred_element_type=jnp.float32,
@@ -311,7 +342,8 @@ def _streaming_attention_kernel(
     window_valid = jnp.arange(tile_k, dtype=jnp.int32) < window_len
     consume(window_kv_ref[0, :swa_tile], window_valid[:swa_tile])
     consume(window_kv_ref[0, swa_tile:], window_valid[swa_tile:])
-    acc_ref[...] = acc_ref[...].astype(jnp.bfloat16).astype(jnp.float32)
+    if numerical_mode == "legacy":
+        acc_ref[...] = acc_ref[...].astype(jnp.bfloat16).astype(jnp.float32)
 
     compressed_len = compressed_lens_ref[token]
     compressed_page_start = compressed_page_starts_ref[token]
@@ -325,18 +357,40 @@ def _streaming_attention_kernel(
             destination = kv_buffer.at[pl.ds(0, compressed_tile)]
             pltpu.make_async_copy(destination, destination, semaphore).wait()
             return
-        for page_in_block in range(pages_per_block):
+
+        def fetch_page(page_in_block, _):
             logical_page = block * pages_per_block + page_in_block
             table_location = jnp.minimum(
                 compressed_page_start + logical_page,
                 compressed_page_indices_ref.shape[0] - 1,
             )
             physical_page = compressed_page_indices_ref[table_location]
-            pltpu.make_async_copy(
-                cache_rows.at[pl.ds(physical_page * page_size, page_size)],
-                kv_buffer.at[pl.ds(page_in_block * page_size, page_size)],
-                semaphore,
-            ).start()
+            if page_size == 1:
+                # V4 owns one record per token page. TPU DMA still needs an
+                # aligned eight-row tile: gather that tile and select the
+                # actual record in VMEM, without changing framework ownership
+                # or materializing request-major compressed KV in HBM.
+                pltpu.make_async_copy(
+                    cache_rows.reshape(-1, 8, head_dim).at[physical_page // 8],
+                    kv_buffer.at[page_in_block],
+                    semaphore,
+                ).start()
+                compressed_lanes_x2_ref[buffer, page_in_block] = jnp.full(
+                    (128,), physical_page % 8, jnp.int32
+                )
+            else:
+                pltpu.make_async_copy(
+                    cache_rows.at[pl.ds(physical_page * page_size, page_size)],
+                    kv_buffer.at[pl.ds(page_in_block * page_size, page_size)],
+                    semaphore,
+                ).start()
+            return _
+
+        if page_size == 1:
+            jax.lax.fori_loop(0, pages_per_block, fetch_page, jnp.int32(0))
+        else:
+            for page_in_block in range(pages_per_block):
+                fetch_page(page_in_block, None)
 
     @pl.when(num_blocks > 0)
     def _start_first_block():
@@ -352,21 +406,38 @@ def _streaming_attention_kernel(
             fetch(next_block, next_buffer, wait=False)
 
         valid = block * compressed_tile + jnp.arange(compressed_tile, dtype=jnp.int32)
-        consume(compressed_kv_x2_ref[buffer, ...], valid < compressed_len)
+        rows = compressed_kv_x2_ref[buffer, ...]
+        if page_size == 1:
+            lanes = compressed_lanes_x2_ref[buffer, :, 0]
+            rows = jnp.sum(
+                jnp.where(
+                    jnp.arange(8)[None, :, None] == lanes[:, None, None],
+                    rows,
+                    0,
+                ).astype(jnp.float32),
+                axis=1,
+            ).astype(jnp.bfloat16)
+        consume(rows, valid < compressed_len)
         return next_buffer
 
     jax.lax.fori_loop(0, num_blocks, consume_compressed, jnp.int32(0), unroll=False)
 
-    sink_term = jnp.exp(sink - m_ref[...][:, :1])
-    denominator = l_ref[...][:, :1] + sink_term
-    out_ref[...] = (acc_ref[...] * pl.reciprocal(denominator, approx=True)).astype(jnp.bfloat16)[
-        None, ...
-    ]
+    if numerical_mode == "v4":
+        final_maximum = jnp.maximum(m_ref[...][:, :1], sink)
+        rescale = jnp.exp(m_ref[...][:, :1] - final_maximum)
+        denominator = l_ref[...][:, :1] * rescale + jnp.exp(sink - final_maximum)
+        out_ref[...] = round_bf16(acc_ref[...] * rescale / denominator)[None, ...]
+    else:
+        sink_term = jnp.exp(sink - m_ref[...][:, :1])
+        denominator = l_ref[...][:, :1] + sink_term
+        out_ref[...] = (acc_ref[...] * pl.reciprocal(denominator, approx=True)).astype(
+            jnp.bfloat16
+        )[None, ...]
 
 
 @functools.partial(
     jax.jit,
-    static_argnames=("softmax_scale", "interpret", "schedule"),
+    static_argnames=("softmax_scale", "interpret", "schedule", "numerical_mode"),
 )
 def _streaming_attention(
     q,
@@ -381,8 +452,13 @@ def _streaming_attention(
     schedule: HCAKernelSchedule,
     softmax_scale: float,
     interpret: bool | None = None,
+    numerical_mode="legacy",
 ):
     """Stream both HCA segments through one Pallas online-softmax program."""
+    if numerical_mode not in ("legacy", "v4"):
+        raise ValueError("HCA numerical_mode must be legacy or v4")
+    if numerical_mode == "v4" and schedule.compressed_tile != 64:
+        raise ValueError("V4 HCA requires fixed 64-key attention reductions")
     if q.ndim != 3 or window_rows.ndim != 3 or compressed_cache.ndim != 4:
         raise ValueError("q/window/cache must be [T,H,D]/[T,K,D]/physical 4D")
     tokens, heads, head_dim = q.shape
@@ -409,6 +485,19 @@ def _streaming_attention(
 
     padded_heads = _align(heads, schedule.sublanes)
     page_size = compressed_cache.shape[1] * compressed_cache.shape[2]
+    if page_size == 1:
+        compressed_cache = jnp.pad(
+            compressed_cache,
+            (
+                (0, _align(compressed_cache.shape[0], 8) - compressed_cache.shape[0]),
+                (0, 0),
+                (0, 0),
+                (0, 0),
+            ),
+        )
+        # Physical DMA storage must have an aligned minor row dimension even
+        # though each logical page-table element still denotes just one row.
+        compressed_cache = compressed_cache.reshape(-1, 1, 8, compressed_cache.shape[-1])
     if compressed_tile % page_size:
         raise ValueError("physical cache page_size must divide the compressed tile")
     pages_per_block = compressed_tile // page_size
@@ -441,6 +530,7 @@ def _streaming_attention(
             tile_k=tile_k,
             compressed_tile=compressed_tile,
             softmax_scale=float(softmax_scale),
+            numerical_mode=numerical_mode,
         ),
         grid_spec=pltpu.PrefetchScalarGridSpec(
             num_scalar_prefetch=len(scalar_prefetches),
@@ -457,7 +547,13 @@ def _streaming_attention(
             ),
             out_specs=pl.BlockSpec((1, padded_heads, head_dim), lambda token, *_: (token, 0, 0)),
             scratch_shapes=(
-                pltpu.VMEM((2, compressed_tile, head_dim), compressed_cache.dtype),
+                pltpu.VMEM(
+                    (2, compressed_tile, 8, head_dim)
+                    if page_size == 1
+                    else (2, compressed_tile, head_dim),
+                    compressed_cache.dtype,
+                ),
+                pltpu.VMEM((2, compressed_tile if page_size == 1 else 1, 128), jnp.int32),
                 pltpu.SemaphoreType.DMA((2,)),
                 pltpu.VMEM((padded_heads, schedule.mxu_lanes), jnp.float32),
                 pltpu.VMEM((padded_heads, schedule.mxu_lanes), jnp.float32),
@@ -472,7 +568,7 @@ def _streaming_attention(
         interpret=interpret,
         name=(
             f"hca-paged-stream-swa{tile_k}-hca{compressed_tile}"
-            f"-p{page_size}-h{padded_heads}-d{head_dim}"
+            f"-p{page_size}-h{padded_heads}-d{head_dim}" + ("-v4" if numerical_mode == "v4" else "")
         ),
     )(
         *scalar_prefetches,

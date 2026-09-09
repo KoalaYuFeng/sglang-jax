@@ -27,6 +27,8 @@ from jax import lax
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
+from sgl_jax.srt.kernels.low_bit.formats import round_bf16
+
 Enum = enum.Enum
 DEFAULT_VMEM_LIMIT_BYTES = 100 * 1024 * 1024
 
@@ -99,6 +101,7 @@ def _scores_kernel(
     seq_batch_size: int,
     page_pool_size: int | None = None,
     num_bkv_max: int | None = None,
+    numerical_mode: str = "legacy",
 ):
     _, num_q_heads, head_dim = q_hbm_ref.shape
     lkv_dim = cache_kv_hbm_ref.shape[-1]
@@ -384,9 +387,15 @@ def _scores_kernel(
                     preferred_element_type=jnp.float32,
                 )
                 s = s.reshape(-1, num_q_heads, s.shape[-1])
+                if numerical_mode == "v4":
+                    s = round_bf16(s).astype(jnp.float32)
                 s = jnp.maximum(s, 0.0)
                 s = s * bq_weights.astype(jnp.float32)[:, :, None]
+                if numerical_mode == "v4":
+                    s = round_bf16(s).astype(jnp.float32)
                 s_summed = s.sum(axis=1)
+                if numerical_mode == "v4":
+                    s_summed = round_bf16(s_summed).astype(jnp.float32)
                 if scale_val is not None:
                     s_summed = s_summed * scale_val
                 k_span = bkv_idx * bkv_sz + lax.broadcasted_iota(jnp.int32, s_summed.shape, 1)
@@ -425,7 +434,11 @@ def _scores_kernel(
                     + bq_idx * bq_sz
                     + jnp.arange(bq_sz, dtype=jnp.int32)
                 )
-                bq_pos_compressed_vec.append(q_pos // compression_ratio)
+                bq_pos_compressed_vec.append(
+                    (q_pos + 1) // compression_ratio - 1
+                    if numerical_mode == "v4"
+                    else q_pos // compression_ratio
+                )
 
             # Wait for cur bq if not ready yet
             wait_fetch_bq(batch_start_seq_idx, bq_idx, bq_sem_idx)
@@ -496,7 +509,11 @@ def _scores_kernel(
                     + bq_idx * bq_sz
                     + jnp.arange(bq_sz, dtype=jnp.int32)
                 )
-                bq_pos_compressed_vec.append(q_pos // compression_ratio)
+                bq_pos_compressed_vec.append(
+                    (q_pos + 1) // compression_ratio - 1
+                    if numerical_mode == "v4"
+                    else q_pos // compression_ratio
+                )
 
             wait_fetch_bq(batch_start_seq_idx, bq_idx, bq_sem_idx)
             bq_vec = load_bq(bq_sem_idx)
@@ -625,6 +642,9 @@ def prepare_outputs(out):
         "num_queries_per_block",
         "vmem_limit_bytes",
         "decode_req_batch_size",
+        "numerical_mode",
+        "candidate_count",
+        "return_scores",
     ),
 )
 def streamindex_topk(
@@ -642,6 +662,9 @@ def streamindex_topk(
     num_queries_per_block: tuple[int, int, int] | int | None = None,
     vmem_limit_bytes: int = DEFAULT_VMEM_LIMIT_BYTES,
     decode_req_batch_size: int = 4,
+    numerical_mode: str = "legacy",
+    candidate_count: int | None = None,
+    return_scores: bool = False,
 ) -> jax.Array:
     """StreamIndex Top-K retrieval.
 
@@ -670,6 +693,14 @@ def streamindex_topk(
     # Scale factors for the FP8 index cache format are packed directly inside
     # `cache_kv` along the width dimension, keeping HBM transactions fused.
 
+    if numerical_mode not in ("legacy", "v4"):
+        raise ValueError("StreamIndex numerical_mode must be legacy or v4")
+    if numerical_mode == "v4" and cache_kv.dtype != jnp.bfloat16:
+        raise ValueError("V4 StreamIndex requires explicit BF16/QAT keys, not packed FP8")
+    if return_scores and numerical_mode != "v4":
+        raise ValueError("return_scores is only supported for explicit V4 diagnostics")
+    if candidate_count is not None and (candidate_count < k or numerical_mode != "v4"):
+        raise ValueError("candidate_count must cover k and requires explicit V4 mode")
     if num_kv_pages_per_block is None or num_queries_per_block is None:
         raise ValueError("num_kv_pages_per_block and num_queries_per_block must be specified.")
 
@@ -699,7 +730,7 @@ def streamindex_topk(
         bkv_sz = page_size * bkv_p
         if bkv_sz % 128 != 0:
             raise ValueError(
-                f"bkv_sz ({page_size} * {bkv_p} = {bkv_sz}) must be a multiple" " of 128."
+                f"bkv_sz ({page_size} * {bkv_p} = {bkv_sz}) must be a multiple of 128."
             )
     num_sublanes_total = max(
         align_to(pages_per_seq, bkv_p) * page_size // 128 for bkv_p in num_kv_pages_per_blocks
@@ -800,6 +831,8 @@ def streamindex_topk(
         )
 
         scope_name = f"StreamIdxTC-{case.symbol}-bq_{bq_sz}-bkvp_{bkv_p}"
+        if numerical_mode == "v4":
+            scope_name += "-v4"
         kernel = jax.named_scope(scope_name)(
             pl.pallas_call(
                 functools.partial(
@@ -809,6 +842,7 @@ def streamindex_topk(
                     bq_sz=bq_sz,
                     bkv_p=bkv_p,
                     seq_batch_size=seq_batch_size,
+                    numerical_mode=numerical_mode,
                 ),
                 grid_spec=pltpu.PrefetchScalarGridSpec(
                     num_scalar_prefetch=len(scalar_prefetches),
@@ -903,6 +937,10 @@ def streamindex_topk(
     )
 
     scores = scores.reshape(q.shape[0], -1)
+    if candidate_count is not None:
+        if candidate_count > scores.shape[1]:
+            raise ValueError("candidate_count exceeds the page-table capacity")
+        scores = scores[:, :candidate_count]
     if scores.shape[1] < k:
         scores = jnp.pad(
             scores,
@@ -917,7 +955,16 @@ def streamindex_topk(
 
     # jax.lax.approx_max_k(recall_target=1.0) is equivalent to jax.lax.top_k
     # but faster.
-    top_vals, top_idxs = jax.lax.approx_max_k(scores, k, reduction_dimension=-1, recall_target=1.0)
+    if numerical_mode == "v4":
+        # BF16 score ties are common. Match the retained V4 exact ordering,
+        # including its invalid trailing placeholders for diagnostic traces.
+        top_vals, top_idxs = jax.lax.top_k(scores, k)
+        if return_scores:
+            return scores, top_idxs
+    else:
+        top_vals, top_idxs = jax.lax.approx_max_k(
+            scores, k, reduction_dimension=-1, recall_target=1.0
+        )
     topk_idxs = jnp.where(top_vals == -jnp.inf, -1, top_idxs)
     return topk_idxs[: q.shape[0], :k]
 

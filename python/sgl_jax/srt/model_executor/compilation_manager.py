@@ -190,6 +190,11 @@ class CompilationManager:
                     dp_size=self.dp_size,
                     per_dp_bs_size=bs_val // self.dp_size,
                 )
+                prepare_batch = getattr(
+                    getattr(model_runner, "attn_backend", None), "prepare_precompile_batch", None
+                )
+                if prepare_batch is not None:
+                    prepare_batch(batch)
                 if prepare_lora_fn is not None:
                     prepare_lora_fn(batch)
                 sampling_metadata = SamplingMetadata.from_model_worker_batch(
@@ -264,6 +269,11 @@ class CompilationManager:
                     dp_size=self.dp_size,
                     per_dp_bs_size=bs_val // self.dp_size,
                 )
+                prepare_batch = getattr(
+                    getattr(model_runner, "attn_backend", None), "prepare_precompile_batch", None
+                )
+                if prepare_batch is not None:
+                    prepare_batch(batch)
                 if prepare_lora_fn is not None:
                     prepare_lora_fn(batch)
                 sampling_metadata = SamplingMetadata.from_model_worker_batch(

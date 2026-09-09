@@ -306,6 +306,7 @@ LutFn = Callable[[int, int, int], tuple[int, int, int] | None]
         "preferred_element_type",
         "tiling",
         "interpret",
+        "rhs_adapter",
     ],
 )
 def gmm(
@@ -319,6 +320,7 @@ def gmm(
     group_offset: jnp.ndarray | None = None,
     existing_out: jnp.ndarray | None = None,
     interpret: bool = False,
+    rhs_adapter: Any | None = None,
 ) -> jnp.ndarray:
     """Compute lhs[sizes[i-1]:sizes[i], :] @ rhs for each group 'i'.
 
@@ -335,6 +337,10 @@ def gmm(
       existing_out: Existing output to write to.
       interpret: Whether or not to run the kernel in interpret mode, helpful for
         testing and debugging.
+      rhs_adapter: Optional hashable storage/numerics adapter. It supplies
+        validate, logical_shape, validate_tiling, block_specs and dot methods,
+        plus name and compiler_params. Group scheduling, masking and the Pallas
+        pipeline remain shared. None preserves the ordinary GMM path.
 
     Returns:
       A 2d, jnp.ndarray with shape [m, n].
@@ -353,7 +359,8 @@ def gmm(
         group_offset = group_offset[None]
     num_current_groups = rhs.shape[0]
     num_total_groups = group_sizes.shape[0]
-    _validate_args(
+    validate = _validate_args if rhs_adapter is None else rhs_adapter.validate
+    validate(
         lhs=lhs,
         rhs=rhs,
         group_sizes=group_sizes,
@@ -362,7 +369,8 @@ def gmm(
     )
 
     # Gather shape information.
-    m, k, n = (lhs.shape[0], lhs.shape[1], rhs.shape[-1])
+    rhs_shape = rhs.shape if rhs_adapter is None else rhs_adapter.logical_shape(rhs)
+    m, k, n = (lhs.shape[0], lhs.shape[1], rhs_shape[-1])
 
     # If tiling is callable, look up the problem dimensions in the LUT. If no
     # tuned tile dimensions are available throw an error.
@@ -384,8 +392,10 @@ def gmm(
         raise ValueError(f"No tuned tiling found for (m, k, n) = ({m}, {k}, {n})")
 
     tm, tk, tn = tiling
+    if rhs_adapter is not None:
+        rhs_adapter.validate_tiling(tm=tm, tk=tk, tn=tn, k=k)
 
-    if rhs_scale is not None:
+    if rhs_scale is not None and rhs_adapter is None:
         assert isinstance(rhs_scale, jax.Array)
         assert rhs_scale.shape[0] == num_current_groups
         num_quant_blocks = rhs_scale.shape[1]
@@ -402,15 +412,13 @@ def gmm(
     num_quant_blocks_per_tk = pl.cdiv(tk, quant_block_size)
 
     # Create the metadata we need for computation.
-    group_metadata, num_active_tiles = (
-        make_group_metadata(  # pylint: disable=unbalanced-tuple-unpacking
-            group_sizes=group_sizes,
-            m=m,
-            tm=tm,
-            start_group=group_offset[0],
-            num_nonzero_groups=rhs.shape[0],
-            visit_empty_groups=False,
-        )
+    group_metadata, num_active_tiles = make_group_metadata(  # pylint: disable=unbalanced-tuple-unpacking
+        group_sizes=group_sizes,
+        m=m,
+        tm=tm,
+        start_group=group_offset[0],
+        num_nonzero_groups=rhs.shape[0],
+        visit_empty_groups=False,
     )
 
     def kernel(
@@ -469,15 +477,18 @@ def gmm(
             loaded_rhs = mask_k_rem_rhs(rhs[...])
 
             acc = acc_scratch[...]
-            for b_i in range(num_quant_blocks_per_tk):
-                partial_result = jnp.dot(
-                    loaded_lhs[..., b_i * quant_block_size : (b_i + 1) * quant_block_size],
-                    loaded_rhs[b_i * quant_block_size : (b_i + 1) * quant_block_size, ...],
-                    preferred_element_type=jnp.float32,
-                )
-                if rhs_scale is not None:
-                    partial_result *= jnp.broadcast_to(rhs_scale[b_i], partial_result.shape)
-                acc = acc + partial_result
+            if rhs_adapter is not None:
+                acc = acc + rhs_adapter.dot(loaded_lhs, loaded_rhs, rhs_scale[...])
+            else:
+                for b_i in range(num_quant_blocks_per_tk):
+                    partial_result = jnp.dot(
+                        loaded_lhs[..., b_i * quant_block_size : (b_i + 1) * quant_block_size],
+                        loaded_rhs[b_i * quant_block_size : (b_i + 1) * quant_block_size, ...],
+                        preferred_element_type=jnp.float32,
+                    )
+                    if rhs_scale is not None:
+                        partial_result *= jnp.broadcast_to(rhs_scale[b_i], partial_result.shape)
+                    acc = acc + partial_result
 
             if is_last_k_tile:
                 loaded_out = out[...].astype(jnp.float32)
@@ -552,6 +563,10 @@ def gmm(
         rhs_scale_block_spec = pl.BlockSpec(
             (None, num_quant_blocks_per_tk, 1, tn), rhs_scale_transform_indices
         )
+    if rhs_adapter is not None:
+        rhs_block_spec, rhs_scale_block_spec = rhs_adapter.block_specs(
+            tk=tk, tn=tn, indices=rhs_transform_indices
+        )
 
     if rhs_bias is None:
         rhs_bias_block_spec = None
@@ -559,9 +574,9 @@ def gmm(
         rhs_bias_block_spec = pl.BlockSpec((None, 1, tn), rhs_bias_transform_indices)
 
     lhs_bytes = lhs.size * lhs.itemsize
-    rhs_bytes = (k * n) * rhs.itemsize  # We don't read all of rhs
+    rhs_bytes = (rhs.size // num_current_groups) * rhs.itemsize  # One expert, not all of rhs.
     if rhs_scale is not None:
-        rhs_bytes += (num_quant_blocks * n) * rhs_scale.itemsize
+        rhs_bytes += (rhs_scale.size // num_current_groups) * rhs_scale.itemsize
     if rhs_bias is not None:
         rhs_bytes += n * rhs_bias.itemsize
     out_bytes = (m * n) * jnp.dtype(preferred_element_type).itemsize
@@ -591,11 +606,15 @@ def gmm(
                 "parallel",
                 "arbitrary",
                 "arbitrary",
-            )
+            ),
+            **({} if rhs_adapter is None else rhs_adapter.compiler_params),
         ),
         interpret=interpret,
         cost_estimate=cost_estimate,
-        name=f"gmm-g_{num_current_groups}-m_{m}-k_{k}-n_{n}-tm_{tm}-tk_{tk}-tn_{tn}",
+        name=(
+            f"gmm{'_' + rhs_adapter.name if rhs_adapter is not None else ''}"
+            f"-g_{num_current_groups}-m_{m}-k_{k}-n_{n}-tm_{tm}-tk_{tk}-tn_{tn}"
+        ),
     )
 
     out = call_gmm(

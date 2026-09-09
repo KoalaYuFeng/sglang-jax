@@ -97,13 +97,24 @@ class CSAGatherSchedule:
     num_row_subchunks: int
 
 
-def get_csa_compressor_projection_k_tile(hidden: int, batch: int) -> int:
+def _is_v5p(device_kind: str | None) -> bool:
+    normalized = (device_kind or "").strip().lower()
+    return normalized == "tpu v5" or "v5p" in normalized
+
+
+def get_csa_compressor_projection_k_tile(
+    hidden: int, batch: int, *, device_kind: str | None = None
+) -> int:
     if hidden <= 0 or hidden % TPU_V6E.vector_lanes:
         raise ValueError("hidden must be a positive multiple of the TPU lane count")
     if batch <= 0:
         raise ValueError("batch must be positive")
     small_tile, large_tile = V6E_CALIBRATION.projection_k_tiles
     preferred = large_tile if batch > TPU_V6E.uint8_row_tile else small_tile
+    if _is_v5p(device_kind):
+        # Two BF16 weight buffers [512,2560] consume 5 MiB. K1024
+        # exceeds the 16 MiB scope for a ragged 132-token prefill.
+        preferred = 512
     tile = min(hidden, preferred)
     while hidden % tile:
         tile -= TPU_V6E.vector_lanes
@@ -215,9 +226,14 @@ def get_csa_attention_schedule(
     query_count: int,
     *,
     shared_window: bool = False,
+    device_kind: str | None = None,
 ) -> tuple[int, int]:
     if query_count <= 0:
         raise ValueError("query_count must be positive")
+    if _is_v5p(device_kind):
+        # v5p grants 16 MiB scoped VMEM by default. The v6e Q8/K512
+        # shared-window kernel needs ~25 MiB at 64 heads; stream Q4/K256.
+        return CSA_TOP_K // PIPELINE_BUFFERS, min(query_count, TPU_V6E.sublanes // 2)
     selected_tile = CSA_TOP_K if shared_window else CSA_TOP_K // PIPELINE_BUFFERS
     return selected_tile, min(query_count, TPU_V6E.sublanes)
 

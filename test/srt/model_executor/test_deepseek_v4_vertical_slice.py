@@ -18,6 +18,7 @@ import numpy as np
 import pytest
 from jax.sharding import NamedSharding
 from jax.sharding import PartitionSpec as P
+
 from sgl_jax.srt.kernels.csa.csa_memory import CSAKVPool, CSARecurrentStatePool
 from sgl_jax.srt.kernels.csa.tune import (
     CSA_ATTENTION_DIM,
@@ -92,9 +93,7 @@ class _Config:
             or self.heads != CSA_INDEX_HEADS
             or self.head_dim != CSA_ATTENTION_DIM
         ):
-            raise ValueError(
-                "the production HCA/CSA kernels require hidden=4096 and 64x512"
-            )
+            raise ValueError("the production HCA/CSA kernels require hidden=4096 and 64x512")
         if set(self.compression_ratios) - {
             _SWA_COMPRESSION_RATIO,
             CSA_COMPRESSION_RATIO,
@@ -226,9 +225,7 @@ def _rope(x, positions, cos, sin, *, inverse=False):
     rope_dim = 2 * CSA_ROPE_FREQUENCY_DIM
     prefix, tail = x[..., :-rope_dim], x[..., -rope_dim:].astype(jnp.float32)
     pairs = tail.reshape(*tail.shape[:-1], CSA_ROPE_FREQUENCY_DIM, 2)
-    table_shape = (
-        (positions.shape[0],) + (1,) * (pairs.ndim - 3) + (CSA_ROPE_FREQUENCY_DIM,)
-    )
+    table_shape = (positions.shape[0],) + (1,) * (pairs.ndim - 3) + (CSA_ROPE_FREQUENCY_DIM,)
     c = cos[positions].reshape(table_shape)
     s = sin[positions].reshape(table_shape)
     if inverse:
@@ -241,15 +238,11 @@ def _rope(x, positions, cos, sin, *, inverse=False):
 
 @functools.partial(jax.jit, static_argnames=("config",))
 def _attention_inputs(x, positions, weights: _Weights, config: _Config):
-    qr = _rms_norm(
-        x @ weights.q_a, jnp.ones((config.q_rank,), jnp.float32), config.norm_eps
-    )
+    qr = _rms_norm(x @ weights.q_a, jnp.ones((config.q_rank,), jnp.float32), config.norm_eps)
     q = (qr @ weights.q_b).reshape(-1, config.heads, config.head_dim)
     q = _rms_norm(q, jnp.ones((config.head_dim,), jnp.float32), config.norm_eps)
     q = _rope(q, positions, weights.cos, weights.sin)
-    kv = _rms_norm(
-        x @ weights.kv, jnp.ones((config.head_dim,), jnp.float32), config.norm_eps
-    )
+    kv = _rms_norm(x @ weights.kv, jnp.ones((config.head_dim,), jnp.float32), config.norm_eps)
     kv = _rope(kv, positions, weights.cos, weights.sin)
     index_q = (qr @ weights.index_q).reshape(-1, CSA_INDEX_HEADS, CSA_INDEX_DIM)
     index_q = _rope(index_q, positions, weights.cos, weights.sin)
@@ -284,18 +277,14 @@ def _moe(x, token_ids, weights: _Weights, config: _Config, layer_id: int):
     scores = jnp.sqrt(jax.nn.softplus(x.astype(jnp.float32) @ weights.route))
     if layer_id < 3:
         first = jnp.mod(token_ids, config.experts)
-        second = jnp.mod(
-            first + 1 + jnp.mod(token_ids, config.experts - 1), config.experts
-        )
+        second = jnp.mod(first + 1 + jnp.mod(token_ids, config.experts - 1), config.experts)
         selected = jnp.stack((first, second), axis=-1)
     else:
         _, selected = jax.lax.top_k(scores + weights.route_bias, config.top_k)
     selected_scores = jnp.take_along_axis(scores, selected, axis=-1)
     selected_scores /= jnp.sum(selected_scores, axis=-1, keepdims=True)
     dispatch = (
-        jnp.zeros_like(scores)
-        .at[jnp.arange(x.shape[0])[:, None], selected]
-        .set(selected_scores)
+        jnp.zeros_like(scores).at[jnp.arange(x.shape[0])[:, None], selected].set(selected_scores)
     )
     gate = jnp.einsum("td,edi->tei", x, weights.expert_gate).astype(jnp.float32)
     up = jnp.einsum("td,edi->tei", x, weights.expert_up).astype(jnp.float32)
@@ -308,9 +297,7 @@ def _moe(x, token_ids, weights: _Weights, config: _Config, layer_id: int):
     routed = jnp.sum(dispatch[..., None] * expert_output.astype(jnp.float32), axis=1)
     shared_gate = (x @ weights.shared_gate).astype(jnp.float32)
     shared_up = (x @ weights.shared_up).astype(jnp.float32)
-    shared_hidden = jax.nn.silu(
-        jnp.minimum(shared_gate, config.swiglu_limit)
-    ) * jnp.clip(
+    shared_hidden = jax.nn.silu(jnp.minimum(shared_gate, config.swiglu_limit)) * jnp.clip(
         shared_up,
         -config.swiglu_limit,
         config.swiglu_limit,
@@ -329,15 +316,11 @@ def _swa_attention(q, kv, positions, query_lengths, seq_lens, cache, sink):
     ):
         token_stop = token_start + query_length
         prefix_length = sequence_length - query_length
-        history_positions = jnp.arange(
-            max(0, prefix_length - CSA_WINDOW_SIZE), prefix_length
-        )
+        history_positions = jnp.arange(max(0, prefix_length - CSA_WINDOW_SIZE), prefix_length)
         history = cache[request, jnp.mod(history_positions, CSA_WINDOW_SIZE)]
         request_kv = kv[token_start:token_stop]
         keys = jnp.concatenate((history, request_kv), axis=0)
-        key_positions = jnp.concatenate(
-            (history_positions, positions[token_start:token_stop])
-        )
+        key_positions = jnp.concatenate((history_positions, positions[token_start:token_stop]))
         scores = (
             jnp.einsum(
                 "thd,kd->thk",
@@ -367,15 +350,9 @@ def _swa_attention(q, kv, positions, query_lengths, seq_lens, cache, sink):
 
 class _CSAPageTables:
     def __init__(self, requests, max_context):
-        compressed_pages = math.ceil(
-            max_context / CSA_COMPRESSION_RATIO / CSA_DEFAULT_PAGE_SIZE
-        )
-        self.compressed = (
-            1 + np.arange(requests, dtype=np.int32)[:, None] * compressed_pages
-        )
-        self.compressed = (
-            self.compressed + np.arange(compressed_pages, dtype=np.int32)[None]
-        )
+        compressed_pages = math.ceil(max_context / CSA_COMPRESSION_RATIO / CSA_DEFAULT_PAGE_SIZE)
+        self.compressed = 1 + np.arange(requests, dtype=np.int32)[:, None] * compressed_pages
+        self.compressed = self.compressed + np.arange(compressed_pages, dtype=np.int32)[None]
         window_pages = math.ceil(max_context / CSA_DEFAULT_PAGE_SIZE)
         self.window = np.broadcast_to(
             1 + np.arange(requests, dtype=np.int32)[:, None], (requests, window_pages)
@@ -424,9 +401,7 @@ class _Runtime:
                 )
                 for _ in range(requests)
             ]
-            self.request_ids = np.asarray(
-                self.hca_allocator.alloc(request_objects), np.int32
-            )
+            self.request_ids = np.asarray(self.hca_allocator.alloc(request_objects), np.int32)
             self.csa_state = CSARecurrentStatePool(csa_layers, requests, mesh)
             self.csa_pool = CSAKVPool(
                 max(requests * max_context, 512),
@@ -449,9 +424,7 @@ class _Runtime:
         }
 
     def prepare(self, mode, positions, query_lengths, prefix_lengths):
-        seq_lens = np.asarray(query_lengths, np.int32) + np.asarray(
-            prefix_lengths, np.int32
-        )
+        seq_lens = np.asarray(query_lengths, np.int32) + np.asarray(prefix_lengths, np.int32)
         self.hca_allocator.ensure_compressed_capacity(self.request_ids, seq_lens)
         worker_batch = SimpleNamespace(
             forward_mode=mode,
@@ -459,18 +432,12 @@ class _Runtime:
             seq_lens=seq_lens,
             positions=np.asarray(positions, np.int32),
             extend_seq_lens=(
-                None
-                if mode == ForwardMode.DECODE
-                else np.asarray(query_lengths, np.int32)
+                None if mode == ForwardMode.DECODE else np.asarray(query_lengths, np.int32)
             ),
             extend_prefix_lens=(
-                None
-                if mode == ForwardMode.DECODE
-                else np.asarray(prefix_lengths, np.int32)
+                None if mode == ForwardMode.DECODE else np.asarray(prefix_lengths, np.int32)
             ),
-            recurrent_indices=self.request_pool.get_linear_recurrent_indices(
-                self.request_ids
-            ),
+            recurrent_indices=self.request_pool.get_linear_recurrent_indices(self.request_ids),
         )
         self.hca.forward_metadata = self.hca.get_forward_metadata(worker_batch)
         self.csa.forward_metadata = self.csa.get_forward_metadata(worker_batch)
@@ -486,6 +453,21 @@ class _MiniDeepseekV4:
         self.main_norm = jnp.ones((CSA_ATTENTION_DIM,), jnp.float32)
         self.index_norm = jnp.ones((CSA_INDEX_DIM,), jnp.float32)
         self.sink = jnp.zeros((config.heads,), jnp.float32)
+
+    def _replicated_mhc(self, fn, *args, **kwargs):
+        # Residual streams are replicated over TP; only attention heads are
+        # partitioned in this slice. Pallas needs a manual per-chip boundary
+        # even when its inputs/outputs are replicated on an Explicit mesh.
+        args = tuple(
+            jax.sharding.reshard(value, NamedSharding(self.runtime.mesh, P())) for value in args
+        )
+        return jax.shard_map(
+            functools.partial(fn, **kwargs),
+            mesh=self.runtime.mesh,
+            in_specs=(P(),) * len(args),
+            out_specs=P(),
+            check_vma=False,
+        )(*args)
 
     def _attention(self, layer_id, ratio, x, positions, query_lengths, seq_lens, mode):
         config, weights = self.config, self.weights
@@ -529,9 +511,9 @@ class _MiniDeepseekV4:
             self.runtime.csa_pool.replace_compressor_buffers(
                 layer_id, main_nope, main_rope, index_cache
             )
-            self.runtime.csa_pool.window_buffer[
-                self.runtime.csa_pool._layer_index(layer_id)
-            ] = window
+            self.runtime.csa_pool.window_buffer[self.runtime.csa_pool._layer_index(layer_id)] = (
+                window
+            )
             output = output.reshape(-1, config.heads, config.head_dim)
         else:
 
@@ -571,7 +553,8 @@ class _MiniDeepseekV4:
         config = self.config
         streams = jax.sharding.reshard(streams, P(None, None, None))
         residual = streams
-        x, post, comb = mhc_pre_fused(
+        x, post, comb = self._replicated_mhc(
+            mhc_pre_fused,
             streams,
             fn,
             scale,
@@ -583,7 +566,7 @@ class _MiniDeepseekV4:
         )
         normalized = _rms_norm(x, self.norm, config.norm_eps)
         block_output = operation(normalized)
-        output = mhc_post_fused(block_output, residual, post, comb)
+        output = self._replicated_mhc(mhc_post_fused, block_output, residual, post, comb)
         if trace is not None:
             trace[f"{label}.pre"] = x
             trace[f"{label}.norm"] = normalized
@@ -591,9 +574,7 @@ class _MiniDeepseekV4:
             trace[f"{label}.post"] = output
         return output
 
-    def step(
-        self, token_ids, query_lengths, prefix_lengths, mode, *, return_trace=False
-    ):
+    def step(self, token_ids, query_lengths, prefix_lengths, mode, *, return_trace=False):
         positions_np = np.concatenate(
             [
                 np.arange(prefix, prefix + query, dtype=np.int32)
@@ -602,9 +583,7 @@ class _MiniDeepseekV4:
         )
         positions = jnp.asarray(positions_np)
         token_ids = jnp.asarray(token_ids)
-        seq_lens = self.runtime.prepare(
-            mode, positions_np, query_lengths, prefix_lengths
-        )
+        seq_lens = self.runtime.prepare(mode, positions_np, query_lengths, prefix_lengths)
         streams = jnp.repeat(
             self.weights.embedding[token_ids][:, None],
             self.config.hc_mult,
@@ -635,7 +614,8 @@ class _MiniDeepseekV4:
                 label=f"layer{layer_id}.ffn",
             )
         streams = jax.sharding.reshard(streams, P(None, None, None))
-        hidden = mhc_head_collapse_fused(
+        hidden = self._replicated_mhc(
+            mhc_head_collapse_fused,
             streams,
             self.weights.hc_head_fn,
             self.weights.hc_head_scale,
@@ -656,26 +636,31 @@ class _MiniDeepseekV4:
         return logits
 
 
-def _mesh():
+def _mesh(tp_size=1):
     return jax.sharding.Mesh(
-        np.asarray(jax.devices()[:1], object).reshape(1, 1),
+        np.asarray(jax.devices()[:tp_size], object).reshape(1, tp_size),
         ("data", "tensor"),
         axis_types=(jax.sharding.AxisType.Explicit, jax.sharding.AxisType.Explicit),
     )
 
 
+@pytest.fixture(params=(1, 4), ids=("tp1", "tp4"))
+def tp_size(request):
+    if jax.device_count() < request.param:
+        pytest.skip(f"requires {request.param} TPU devices")
+    # Weight creation precedes the test's inner mesh context. Isolate it too:
+    # other modules install different mesh sizes/device orders at import time.
+    with jax.set_mesh(_mesh(request.param)):
+        yield request.param
+
+
 def _model(config, weights, requests, max_context, mesh):
-    return _MiniDeepseekV4(
-        config, weights, _Runtime(config, requests, max_context, mesh)
-    )
+    return _MiniDeepseekV4(config, weights, _Runtime(config, requests, max_context, mesh))
 
 
 def _reference_inputs(config, weights):
     reference_config = deepseek_v4_oracle.Config(
-        **{
-            field.name: getattr(config, field.name)
-            for field in fields(deepseek_v4_oracle.Config)
-        }
+        **{field.name: getattr(config, field.name) for field in fields(deepseek_v4_oracle.Config)}
     )
     reference_weights = {
         field.name: np.asarray(getattr(weights, field.name), np.float32)
@@ -720,10 +705,10 @@ def _assert_local_trace(actual, expected):
         _assert_nrmse(value, expected[name], _LOCAL_NRMSE_LIMIT)
 
 
-def test_deepseek_v4_prefill_and_decode_are_state_equivalent():
+def test_deepseek_v4_prefill_and_decode_are_state_equivalent(tp_size):
     config = _Config()
     max_context = 256
-    mesh = _mesh()
+    mesh = _mesh(tp_size)
     weights = _make_weights(config, max_context)
     token_ids = np.arange(133, dtype=np.int32) % config.vocab
     with jax.set_mesh(mesh):
@@ -760,9 +745,7 @@ def test_deepseek_v4_prefill_and_decode_are_state_equivalent():
             for name, value in trace.items():
                 decoded_trace[name].append(value)
         decoded = jnp.concatenate(decoded)
-        decoded_trace = {
-            name: jnp.concatenate(values) for name, values in decoded_trace.items()
-        }
+        decoded_trace = {name: jnp.concatenate(values) for name, values in decoded_trace.items()}
         jax.block_until_ready((full, full_next, decoded))
     expected, expected_trace = _reference(token_ids, config, weights)
     full_path_trace = {
@@ -799,10 +782,10 @@ def test_deepseek_v4_prefill_and_decode_are_state_equivalent():
     _assert_nrmse(decoded[4:], full_next)
 
 
-def test_deepseek_v4_ragged_batch_matches_independent_requests():
+def test_deepseek_v4_ragged_batch_matches_independent_requests(tp_size):
     config = _Config()
     max_context = 256
-    mesh = _mesh()
+    mesh = _mesh(tp_size)
     weights = _make_weights(config, max_context, seed=20260905)
     prefixes = (
         np.arange(128, dtype=np.int32) % config.vocab,
@@ -850,9 +833,7 @@ def test_deepseek_v4_ragged_batch_matches_independent_requests():
         for name, value in trace.items():
             expected_trace[name].append(value[-len(suffix) :])
     expected = np.concatenate(expected)
-    expected_trace = {
-        name: np.concatenate(values) for name, values in expected_trace.items()
-    }
+    expected_trace = {name: np.concatenate(values) for name, values in expected_trace.items()}
     _assert_reference_trace(
         {name: np.asarray(value) for name, value in combined_trace.items()},
         expected_trace,

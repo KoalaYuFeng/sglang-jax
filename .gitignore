@@ -126,6 +126,8 @@ celerybeat.pid
 *.sage.py
 
 # Environments
+# Private GCP credentials, machine configuration, local backups and raw profiles.
+/GCP_login/
 .env
 .venv
 env/

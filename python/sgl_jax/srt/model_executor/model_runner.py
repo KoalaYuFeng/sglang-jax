@@ -177,6 +177,11 @@ class ModelRunner(ModelRunnerKVCacheMixin, BaseModelRunner):
     def initialize(self):
         server_args = self.server_args
 
+        if getattr(self.model_config.hf_config, "model_type", None) == "deepseek_v4":
+            from sgl_jax.srt.configs.deepseek_v4 import validate_v4_serving_args
+
+            validate_v4_serving_args(server_args, self.model_config)
+
         # Set highest matmul precision only for GPU/CUDA to improve numerical stability.
         # Do this at runtime (not import time) to avoid initializing busy backends.
         try:
@@ -342,6 +347,10 @@ class ModelRunner(ModelRunnerKVCacheMixin, BaseModelRunner):
             with LoraBatchContext.set_batch(forward_batch):
                 return model(forward_batch, memory_pools, logits_metadata)
 
+        # Keep the compilation entry available for explicit cost/memory/IR
+        # inspection without constructing a different model-forward graph.
+        self._jitted_run_model = jitted_run_model
+
         # Capture base RNG key as a constant in the JIT closure.
         # fold_in(constant, dynamic_step) is computed inside JIT, avoiding
         # the eager jax.random.split that would serialize the host-device pipeline.
@@ -381,6 +390,19 @@ class ModelRunner(ModelRunnerKVCacheMixin, BaseModelRunner):
             logger.warning(
                 "SGLANG_JAX_AOT_DISPATCH is set but speculative decoding is "
                 "enabled; falling back to the stock pjit dispatch path."
+            )
+            use_aot_dispatch = False
+
+        if (
+            use_aot_dispatch
+            and getattr(self.model_config.hf_config, "model_type", None) == "deepseek_v4"
+        ):
+            # The current AOT key only covers leaf shapes/dtypes. V4 also
+            # specializes on static forward mode and logits/capture options;
+            # e.g. one-token prefill and decode must never share an entry.
+            logger.warning(
+                "V4 requires static-metadata-aware AOT cache keys; using the "
+                "validated whole-model pjit path despite SGLANG_JAX_AOT_DISPATCH."
             )
             use_aot_dispatch = False
 
@@ -730,6 +752,17 @@ class ModelRunner(ModelRunnerKVCacheMixin, BaseModelRunner):
             return False
 
         backend = self.server_args.attention_backend
+        if backend == "deepseek_v4":
+            if self.model_config.hf_config.model_type != "deepseek_v4":
+                raise ValueError("deepseek_v4 attention backend requires the V4 model")
+            from sgl_jax.srt.layers.attention.deepseek_v4_paged_backend import V4PagedBackend
+
+            return V4PagedBackend(
+                max_context=self.model_config.context_len, mesh=self.mesh,
+                max_requests=self.server_args.max_running_requests or 4,
+                capacity=self.server_args.max_total_tokens,
+            )
+
         if self.server_args.device == "cpu" and backend in ("fa", "fa_mha"):
             logger.warning(
                 "FlashAttention backend is not supported on CPU; falling back to native."

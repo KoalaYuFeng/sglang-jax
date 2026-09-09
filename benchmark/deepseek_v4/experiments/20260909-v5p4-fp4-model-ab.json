@@ -1,0 +1,439 @@
+{
+  "schema_version": 1,
+  "experiment_id": "v5p4-fp4-model-ab-20260909-02",
+  "measurement_date_utc": "2026-09-09",
+  "publication_date_local": "2026-09-10",
+  "measurement_scope": "ModelWorker, full 43-layer 8K-tail teacher-forced regression; not Engine/HTTP or official accuracy",
+  "model": {
+    "id": "deepseek-ai/DeepSeek-V4-Flash",
+    "revision": "60d8d70770c6776ff598c94bb586a859a38244f1",
+    "layers": 43,
+    "checkpoint_bytes": 159630041626,
+    "checkpoint_files": 73,
+    "weights": "Original packed FP4/FP8/E8M0 block scales; online dequantization; no full BF16 expert collection"
+  },
+  "hardware": {
+    "accelerator_type": "v5p-8",
+    "physical_chips": 4,
+    "tensorcores": 8,
+    "spot": true,
+    "same_node_for_both_variants": true,
+    "zone": "us-east5-a",
+    "runtime": "v5p-ubuntu-2204",
+    "independent_data_disk_gb": 500
+  },
+  "software": {
+    "python": "3.12.14",
+    "jax": "0.11.1",
+    "jaxlib": "0.11.1",
+    "libtpu": "0.0.46.1",
+    "numpy": "2.2.6",
+    "torch": "2.14.0+cpu",
+    "xprof": "2.23.1",
+    "inference_freeze_original_sha256": "1f14f40bd6a3157ea108e81f0116b3ef40779c0c6b256deb2d9892d2b649ed26",
+    "inference_requirements": "requirements-v5p-inference-20260909.txt",
+    "profile_tools_requirements": "requirements-v5p-profile-tools-20260909.txt",
+    "freeze_note": "Inference freeze publishes every dependency pin unchanged but replaces the machine-specific editable checkout line with an installation comment; original freeze SHA256 refers to the private unmodified file."
+  },
+  "source": {
+    "base_commit": "d5e58ee6a9720eb5bba1749c54fe471e1d437ce4",
+    "measured_dirty_tree": true,
+    "framework_fingerprint": "82f6e542105c208a410d4561f1eef6ba360f3911c3643f46570b7eb13cabd363",
+    "reference_fingerprint": "e040be404de999f234c9563112e1e16bc4a7f75e86667d80ccae8880d2348eb4",
+    "profile_entry_sha256": "ca635402706b8e7427bf04c0855bcf082418c774edfd312a877464240b030915",
+    "profile_harness_sha256": "5a46db29a1a6a0c0ff9cf74db2ac0b63cc02580a7a275d879460dcaa88c9c2d3"
+  },
+  "settings": {
+    "server_args": {
+      "context_length": 8192,
+      "tp_size": 4,
+      "ep_size": 4,
+      "dp_size": 1,
+      "moe_dp_size": 1,
+      "max_running_requests": 4,
+      "max_total_tokens": 33280,
+      "max_prefill_tokens": 128,
+      "chunked_prefill_size": 128,
+      "page_size": 128,
+      "dtype": "bfloat16",
+      "attention_backend": "deepseek_v4",
+      "moe_backend": "epmoe",
+      "mem_fraction_static": 0.85,
+      "disable_hybrid_swa_memory": true,
+      "disable_overlap_schedule": true,
+      "disable_precompile": true,
+      "precompile_token_paddings": [
+        128
+      ],
+      "precompile_bs_paddings": [
+        1,
+        2,
+        4
+      ],
+      "random_seed": 42,
+      "enable_mixed_chunk": false
+    },
+    "rounds": 2,
+    "prompt_tokens": 7936,
+    "decode_tokens": 256,
+    "prompt_fixtures": 2,
+    "decode_batch_sizes": [
+      1,
+      2,
+      4
+    ],
+    "timing_scope": "worker generation, wait, full-logit host transfer, finite/argmax checks; excludes page preparation, oracle comparisons, prefix restore, compilation, three warmup calls and profiled calls",
+    "memory_scope": "allocator snapshots; high-water includes CPU prefix copy/restore and compiled shapes, not serving-only peak",
+    "timing_outlier_trimming": false,
+    "three_warmup_calls_per_round": true,
+    "decode_throughput": "aggregate tokens/s across the batch",
+    "attention_partition": "41 CSA/HCA layers head-TP4; first 2 SWA layers and compressor/KV remain replicated",
+    "fixture_execution": {
+      "mhc_backend": "pallas",
+      "hca_backend": "pallas",
+      "csa_backend": "pallas",
+      "moe_backend": "gmm_tuned",
+      "attention_tp": true,
+      "csa_decode_batch": true,
+      "fp8_backend": "gmm",
+      "fused_norm": true,
+      "merged_projections": true,
+      "fused_wo_a": true
+    },
+    "fixture_sha256": {
+      "native": "1941c84bb87feb68b5e4bb2b6cd21cc1b9f715f4b0c351242908ed8c20491a2f",
+      "oracle": "f784ea05fe17081715276c67c136bc98b1c2acd3bcfbe6603bb9c996e178db19",
+      "prefill_logits": "71ebfe497da2aa807fb23e2e42e802783fc2aad2a4e346223f3068345da706a1",
+      "decode_logits": "79c9939a19464467caa54ab789553037e5dd2aa88c41baef0a06619832957f54"
+    },
+    "device_profile_timing_scope": "Average per TensorCore per captured call, not end-to-end wall time; 8 TensorCore planes; all GMM/MoE collective times independently audited against raw events within 1 ns."
+  },
+  "variants": [
+    {
+      "name": "gmm",
+      "execution": {
+        "mhc_backend": "pallas",
+        "hca_backend": "pallas",
+        "csa_backend": "pallas",
+        "moe_backend": "gmm",
+        "attention_tp": true,
+        "csa_decode_batch": true,
+        "fp8_backend": "gmm",
+        "fused_norm": true,
+        "merged_projections": true,
+        "fused_wo_a": true
+      },
+      "complete": true,
+      "finished": true,
+      "output_checks": 3832,
+      "passed_checks": 3832,
+      "maximum_fixture_nrmse": 1.6165743943474808e-7,
+      "all_finite": true,
+      "all_top1_equal": true,
+      "all_rows_bitwise_equal_control": null,
+      "control_bitwise_required": true,
+      "workloads": {
+        "prefill_case0": {
+          "warm_calls": 116,
+          "warm_p50_ms": 396.43439250005486,
+          "warm_p95_ms": 400.980861249991,
+          "warm_tokens_per_second": 322.90305881594423,
+          "all_calls": 124,
+          "warmup_calls": 6,
+          "profiled_calls": 2,
+          "cache_miss_calls": 2
+        },
+        "prefill_case1": {
+          "warm_calls": 118,
+          "warm_p50_ms": 391.81484549988,
+          "warm_p95_ms": 395.20958395006573,
+          "warm_tokens_per_second": 326.81455591794054,
+          "all_calls": 124,
+          "warmup_calls": 6,
+          "profiled_calls": 0,
+          "cache_miss_calls": 0
+        },
+        "B1": {
+          "warm_calls": 504,
+          "warm_p50_ms": 43.84412550007255,
+          "warm_p95_ms": 44.75004709992163,
+          "warm_tokens_per_second": 22.793623728417725,
+          "all_calls": 512,
+          "warmup_calls": 6,
+          "profiled_calls": 2,
+          "cache_miss_calls": 1
+        },
+        "B2": {
+          "warm_calls": 504,
+          "warm_p50_ms": 58.368045499946675,
+          "warm_p95_ms": 60.294527700079925,
+          "warm_tokens_per_second": 34.28277712277734,
+          "all_calls": 512,
+          "warmup_calls": 6,
+          "profiled_calls": 2,
+          "cache_miss_calls": 1
+        },
+        "B4": {
+          "warm_calls": 503,
+          "warm_p50_ms": 63.92712199999551,
+          "warm_p95_ms": 65.72180959999514,
+          "warm_tokens_per_second": 62.57600863156477,
+          "all_calls": 512,
+          "warmup_calls": 6,
+          "profiled_calls": 3,
+          "cache_miss_calls": 1
+        }
+      },
+      "kernel_evidence": {
+        "backend": "gmm",
+        "layer_count": 43,
+        "custom_call_instructions": 129,
+        "complete": true,
+        "hlo_sha256": "02ddb24d3ed83fb8872248623adc08a75e3fd103b53ae30d89818c6cf2c1b72b",
+        "full_scale_layout_copies": 43,
+        "whole_expert_weight_or_scale_slices": 0
+      },
+      "allocator_memory": [
+        {
+          "event": "loaded",
+          "batch": null,
+          "maximum_chip_bytes_in_use": 47724017664,
+          "maximum_chip_peak_bytes_in_use": 47724017664
+        },
+        {
+          "event": "decode_complete",
+          "batch": 4,
+          "maximum_chip_bytes_in_use": 48077023744,
+          "maximum_chip_peak_bytes_in_use": 52980057600
+        }
+      ],
+      "report_folder": "v4-fp4-model-control-20260909-02",
+      "report_sha256": "41f860dd8d77cb820cb29ff233b2dc19a6996828c48e0a26aeb889299e33091a",
+      "raw_timing_audit_sha256": "c3e36a5632b944f42a7bd26fbfb3bfacdc9a2664ddf943ab2480bb68ac9dde6b",
+      "raw_timing_audit_complete": true,
+      "raw_audited_captures": 5,
+      "profiles": {
+        "prefill_case0_prefix7168": {
+          "mean_module_union_ms_per_call": 385.186169721625,
+          "total_exclusive_hlo_self_ms": 384.52722234375034,
+          "fp4_gmm_including_conversion_ms": 205.07561437500004,
+          "moe_all_reduce_including_wait_ms": 51.3915,
+          "full_fp4_scale_layout_copy_ms": 1.35091140625,
+          "gmm_metadata_and_zeroing_ms": 4.994505859375018,
+          "compressor_and_paged_state_ms": 23.43973976562509,
+          "fp8_projection_including_online_dequant_ms": 29.68133679687502
+        },
+        "B1": {
+          "mean_module_union_ms_per_call": 36.284392587875,
+          "total_exclusive_hlo_self_ms": 35.47842414062499,
+          "fp4_gmm_including_conversion_ms": 7.374608671874999,
+          "moe_all_reduce_including_wait_ms": 6.017013437500002,
+          "full_fp4_scale_layout_copy_ms": 1.3233634374999994,
+          "gmm_metadata_and_zeroing_ms": 1.6520818749999997,
+          "compressor_and_paged_state_ms": 4.909612500000005,
+          "fp8_projection_including_online_dequant_ms": 4.738372656250003
+        },
+        "B2": {
+          "mean_module_union_ms_per_call": 50.43092978999999,
+          "total_exclusive_hlo_self_ms": 49.75678710937495,
+          "fp4_gmm_including_conversion_ms": 12.930967890624997,
+          "moe_all_reduce_including_wait_ms": 8.027995000000002,
+          "full_fp4_scale_layout_copy_ms": 1.4291003906249997,
+          "gmm_metadata_and_zeroing_ms": 2.852686250000007,
+          "compressor_and_paged_state_ms": 8.35384695312501,
+          "fp8_projection_including_online_dequant_ms": 4.842826640625002
+        },
+        "B4_boundary8063": {
+          "mean_module_union_ms_per_call": 54.019551767500005,
+          "total_exclusive_hlo_self_ms": 53.32423281249987,
+          "fp4_gmm_including_conversion_ms": 11.984249374999997,
+          "moe_all_reduce_including_wait_ms": 7.86679140625,
+          "full_fp4_scale_layout_copy_ms": 1.32312140625,
+          "gmm_metadata_and_zeroing_ms": 3.13900546875,
+          "compressor_and_paged_state_ms": 11.555592812499954,
+          "fp8_projection_including_online_dequant_ms": 4.602335625
+        },
+        "B4": {
+          "mean_module_union_ms_per_call": 55.2706652295,
+          "total_exclusive_hlo_self_ms": 54.57650687499985,
+          "fp4_gmm_including_conversion_ms": 13.055190859374996,
+          "moe_all_reduce_including_wait_ms": 8.109857968749997,
+          "full_fp4_scale_layout_copy_ms": 1.3233241406249998,
+          "gmm_metadata_and_zeroing_ms": 3.14072,
+          "compressor_and_paged_state_ms": 11.486566953124967,
+          "fp8_projection_including_online_dequant_ms": 4.6031898437499965
+        }
+      }
+    },
+    {
+      "name": "gmm_tuned",
+      "execution": {
+        "mhc_backend": "pallas",
+        "hca_backend": "pallas",
+        "csa_backend": "pallas",
+        "moe_backend": "gmm_tuned",
+        "attention_tp": true,
+        "csa_decode_batch": true,
+        "fp8_backend": "gmm",
+        "fused_norm": true,
+        "merged_projections": true,
+        "fused_wo_a": true
+      },
+      "complete": true,
+      "finished": true,
+      "output_checks": 3832,
+      "passed_checks": 3832,
+      "maximum_fixture_nrmse": 1.6165743943474808e-7,
+      "all_finite": true,
+      "all_top1_equal": true,
+      "all_rows_bitwise_equal_control": true,
+      "control_bitwise_required": true,
+      "workloads": {
+        "prefill_case0": {
+          "warm_calls": 116,
+          "warm_p50_ms": 283.99040650003826,
+          "warm_p95_ms": 287.7885457500611,
+          "warm_tokens_per_second": 450.979198063217,
+          "all_calls": 124,
+          "warmup_calls": 6,
+          "profiled_calls": 2,
+          "cache_miss_calls": 2
+        },
+        "prefill_case1": {
+          "warm_calls": 118,
+          "warm_p50_ms": 278.6048530000471,
+          "warm_p95_ms": 282.3570212000277,
+          "warm_tokens_per_second": 459.4220318916785,
+          "all_calls": 124,
+          "warmup_calls": 6,
+          "profiled_calls": 0,
+          "cache_miss_calls": 0
+        },
+        "B1": {
+          "warm_calls": 504,
+          "warm_p50_ms": 39.50970549999511,
+          "warm_p95_ms": 40.231248449936174,
+          "warm_tokens_per_second": 25.28052481441883,
+          "all_calls": 512,
+          "warmup_calls": 6,
+          "profiled_calls": 2,
+          "cache_miss_calls": 1
+        },
+        "B2": {
+          "warm_calls": 504,
+          "warm_p50_ms": 52.56819000010182,
+          "warm_p95_ms": 54.08806350010309,
+          "warm_tokens_per_second": 38.078778505811556,
+          "all_calls": 512,
+          "warmup_calls": 6,
+          "profiled_calls": 2,
+          "cache_miss_calls": 1
+        },
+        "B4": {
+          "warm_calls": 503,
+          "warm_p50_ms": 58.33981300020241,
+          "warm_p95_ms": 59.728362300006665,
+          "warm_tokens_per_second": 68.57161953666865,
+          "all_calls": 512,
+          "warmup_calls": 6,
+          "profiled_calls": 3,
+          "cache_miss_calls": 1
+        }
+      },
+      "kernel_evidence": {
+        "backend": "gmm_tuned",
+        "layer_count": 43,
+        "custom_call_instructions": 129,
+        "complete": true,
+        "hlo_sha256": "8f156ce86c01f5dce6c3b92f8eb3b84264182a13d15aac6f5867000ee1230813",
+        "full_scale_layout_copies": 0,
+        "whole_expert_weight_or_scale_slices": 0
+      },
+      "allocator_memory": [
+        {
+          "event": "loaded",
+          "batch": null,
+          "maximum_chip_bytes_in_use": 47724017664,
+          "maximum_chip_peak_bytes_in_use": 47724017664
+        },
+        {
+          "event": "decode_complete",
+          "batch": 4,
+          "maximum_chip_bytes_in_use": 48080818176,
+          "maximum_chip_peak_bytes_in_use": 52983852032
+        }
+      ],
+      "report_folder": "v4-fp4-model-tuned-20260909-02",
+      "report_sha256": "081cf75500c5f4fc3c97b5f6dc89e422774989a6f2222390307589210c2fac8c",
+      "raw_timing_audit_sha256": "595d1a466b27bdad8457de2b2d5c46deb85fc416e4122293458aa54a0b3eec4c",
+      "raw_timing_audit_complete": true,
+      "raw_audited_captures": 5,
+      "profiles": {
+        "prefill_case0_prefix7168": {
+          "mean_module_union_ms_per_call": 272.89640311525,
+          "total_exclusive_hlo_self_ms": 272.1770526562502,
+          "fp4_gmm_including_conversion_ms": 119.26403578124996,
+          "moe_all_reduce_including_wait_ms": 24.422007890625,
+          "full_fp4_scale_layout_copy_ms": 0,
+          "gmm_metadata_and_zeroing_ms": 7.003340234375003,
+          "compressor_and_paged_state_ms": 23.355248671875,
+          "fp8_projection_including_online_dequant_ms": 29.591092109374994
+        },
+        "B1": {
+          "mean_module_union_ms_per_call": 32.054813251999995,
+          "total_exclusive_hlo_self_ms": 31.24559304687499,
+          "fp4_gmm_including_conversion_ms": 5.866062578125,
+          "moe_all_reduce_including_wait_ms": 4.7921746093749995,
+          "full_fp4_scale_layout_copy_ms": 0,
+          "gmm_metadata_and_zeroing_ms": 1.6721092187499993,
+          "compressor_and_paged_state_ms": 4.870790781250004,
+          "fp8_projection_including_online_dequant_ms": 4.780557421875003
+        },
+        "B2": {
+          "mean_module_union_ms_per_call": 44.7097433105,
+          "total_exclusive_hlo_self_ms": 44.039124531249946,
+          "fp4_gmm_including_conversion_ms": 10.408757499999997,
+          "moe_all_reduce_including_wait_ms": 6.315123671875003,
+          "full_fp4_scale_layout_copy_ms": 0,
+          "gmm_metadata_and_zeroing_ms": 2.920474140624991,
+          "compressor_and_paged_state_ms": 8.369569296875008,
+          "fp8_projection_including_online_dequant_ms": 4.763563046875
+        },
+        "B4_boundary8063": {
+          "mean_module_union_ms_per_call": 48.955810185500006,
+          "total_exclusive_hlo_self_ms": 48.272260468749884,
+          "fp4_gmm_including_conversion_ms": 9.54666578125,
+          "moe_all_reduce_including_wait_ms": 6.26305546875,
+          "full_fp4_scale_layout_copy_ms": 0,
+          "gmm_metadata_and_zeroing_ms": 3.1567425000000044,
+          "compressor_and_paged_state_ms": 11.554757812499961,
+          "fp8_projection_including_online_dequant_ms": 4.880313750000001
+        },
+        "B4": {
+          "mean_module_union_ms_per_call": 49.99685570799999,
+          "total_exclusive_hlo_self_ms": 49.29727546874988,
+          "fp4_gmm_including_conversion_ms": 10.383833984374995,
+          "moe_all_reduce_including_wait_ms": 6.514030390625,
+          "full_fp4_scale_layout_copy_ms": 0,
+          "gmm_metadata_and_zeroing_ms": 3.156270546874996,
+          "compressor_and_paged_state_ms": 11.489558906249991,
+          "fp8_projection_including_online_dequant_ms": 4.878717265624995
+        }
+      }
+    }
+  ],
+  "limitations": [
+    "Tuned Engine/HTTP stress deferred by user; old serving receipts do not accept this configuration.",
+    "No default backend promotion.",
+    "No official GPU/API accuracy equivalence claim.",
+    "Grouped profile timing does not measure isolated dequant latency or physical HBM/VMEM traffic.",
+    "Collective timings include waiting and do not establish interconnect bandwidth.",
+    "Interrupted -01 candidate is excluded; only fresh same-node -02 A/B is accepted.",
+    "Archived native/oracle fixture receipts retain their original date and source identity."
+  ],
+  "artifacts": {
+    "public_data": "Sanitized settings/results only; credentials, weights, logits and raw profiles remain private.",
+    "verified_local_remote_files": 110,
+    "verified_local_remote_bytes": 4359116886
+  }
+}

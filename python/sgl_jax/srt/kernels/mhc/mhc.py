@@ -19,6 +19,7 @@ import jax
 import jax.experimental.pallas as pl
 import jax.numpy as jnp
 
+from sgl_jax.srt.kernels.low_bit.formats import round_bf16
 from sgl_jax.srt.kernels.mhc.tune import (
     select_collapse_block_tokens,
     select_gates_block_tokens,
@@ -168,6 +169,7 @@ def _collapse_kernel(
     hc: int,
     d: int,
     mode: str,
+    head_rms_mode: str,
     hc_eps: float,
     norm_eps: float,
     dot_precision,
@@ -183,8 +185,8 @@ def _collapse_kernel(
         + norm_eps
     )
 
-    if mode == "head":
-        # Head requires the FP32 normalize -> BF16 round -> projection boundary.
+    if mode == "head" and head_rms_mode == "bf16_pre":
+        # Preserve the original template's normalize -> BF16 -> projection ABI.
         xf = x.astype(jnp.float32).reshape(bt, hc * d)
         normalized = (xf * rms).astype(jnp.bfloat16)
         if dot_precision == jax.lax.Precision.HIGHEST:
@@ -199,7 +201,7 @@ def _collapse_kernel(
         )
     else:
         xf = x.astype(jnp.float32).reshape(bt, hc * d)
-        # Pre moves the RMS scalar after the linear projection.
+        # Pre and V4's opt-in head mode apply RMS after the FP32 projection.
         mixes = (
             jax.lax.dot_general(
                 xf,
@@ -243,6 +245,7 @@ def _run(
     block_tokens: int | None,
     interpret: bool | None,
     dot_precision,
+    head_rms_mode: str = "bf16_pre",
 ):
     hc = hc_mult
     if x_streams.ndim != 3:
@@ -304,6 +307,7 @@ def _run(
         hc=hc,
         d=d,
         mode=mode,
+        head_rms_mode=head_rms_mode,
         hc_eps=float(hc_eps),
         norm_eps=float(norm_eps),
         dot_precision=dot_precision,
@@ -327,7 +331,8 @@ def _run(
         out_specs=out_specs,
         out_shape=out_shape,
         interpret=interpret,
-        name=f"mhc-collapse-{mode}",
+        name=f"mhc-collapse-{mode}"
+        + ("-fp32-post" if mode == "head" and head_rms_mode == "fp32_post" else ""),
     )(*operands)
 
     if mode == "head":
@@ -356,6 +361,7 @@ def _run(
         "block_tokens",
         "interpret",
         "dot_precision",
+        "head_rms_mode",
     ),
 )
 def mhc_head_collapse_fused(
@@ -370,7 +376,18 @@ def mhc_head_collapse_fused(
     block_tokens: int | None = None,
     interpret: bool | None = None,
     dot_precision=jax.lax.Precision.DEFAULT,
+    head_rms_mode: str = "bf16_pre",
 ):
+    """Collapse the head streams using an explicit normalization contract.
+
+    ``bf16_pre`` preserves the original template's normalized BF16 operands.
+    ``fp32_post`` implements V4's FP32 projection followed by the RMS scalar,
+    without an extra normalized-input rounding. Existing callers are unchanged.
+    """
+    if head_rms_mode not in ("bf16_pre", "fp32_post"):
+        raise ValueError("head_rms_mode must be 'bf16_pre' or 'fp32_post'")
+    if head_rms_mode == "fp32_post" and dot_precision != jax.lax.Precision.HIGHEST:
+        raise ValueError("fp32_post head requires dot_precision=HIGHEST")
     if x_streams.ndim < 3:
         raise ValueError(f"x_streams must be [..., hc, d], got {x_streams.shape}")
     outer_shape = x_streams.shape[:-2]
@@ -390,6 +407,7 @@ def mhc_head_collapse_fused(
         block_tokens=block_tokens,
         interpret=interpret,
         dot_precision=dot_precision,
+        head_rms_mode=head_rms_mode,
     )
     return output.reshape(*outer_shape, hidden)
 
@@ -515,6 +533,14 @@ def mhc_post_fused(
             pallas_block_tokens=selected_block_tokens,
         )
     if backend == "xla":
+        # A fused FP32 producer -> BF16 -> FP32 consumer may otherwise lose
+        # the BF16 rounding. In particular, FFN's routed+shared sum must be
+        # rounded before multiplying the post gates, just as the Pallas input
+        # boundary does. Preserve the residual boundary for the same reason.
+        if x.dtype == jnp.bfloat16:
+            x = round_bf16(x)
+        if residual_streams.dtype == jnp.bfloat16:
+            residual_streams = round_bf16(residual_streams)
         return _expand(
             x,
             residual_streams,

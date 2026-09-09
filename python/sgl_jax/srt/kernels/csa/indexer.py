@@ -45,6 +45,9 @@ def paged_lightning_topk(
     decode_request_batch: int | None = None,
     completed_groups_only: bool = True,
     workload_case: str | None = None,
+    numerical_mode: str = "legacy",
+    candidate_count: int | None = None,
+    return_scores: bool = False,
 ):
     """Adapt CSA metadata to the shared DSA Top-K implementation."""
     if q.ndim != 3 or q.shape[1:] != (CSA_INDEX_HEADS, CSA_INDEX_DIM):
@@ -53,6 +56,31 @@ def paged_lightning_topk(
         raise ValueError("CSA index queries must use BF16")
     if weights.shape != q.shape[:2]:
         raise ValueError("CSA index weights must be [T,64]")
+    if numerical_mode not in ("legacy", "v4"):
+        raise ValueError("CSA indexer numerical_mode must be legacy or v4")
+    if numerical_mode == "v4":
+        if index_cache.dtype != jnp.bfloat16 or index_cache.shape[1:] != (16, 2, 128):
+            raise ValueError("V4 index cache must be BF16[pages,16,2,128] with FP4 QAT")
+        if not completed_groups_only:
+            raise ValueError("V4 indexer requires completed compression groups")
+        return streamindex_topk(
+            q,
+            weights,
+            index_cache,
+            seq_lens,
+            page_indices,
+            cu_q_lens,
+            distribution.at[1].set(distribution[0]),
+            k=k,
+            compression_ratio=CSA_COMPRESSION_RATIO,
+            num_kv_pages_per_block=4,
+            num_queries_per_block=8,
+            decode_req_batch_size=1,
+            vmem_limit_bytes=16 * 1024 * 1024,
+            numerical_mode="v4",
+            candidate_count=candidate_count,
+            return_scores=return_scores,
+        )
     if (
         index_cache.dtype != jnp.uint8
         or index_cache.ndim != 4

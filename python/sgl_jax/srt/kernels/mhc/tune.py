@@ -23,6 +23,19 @@ class MHCPlatform:
 
 _PLATFORMS = (
     MHCPlatform(
+        name="TPU v5p",
+        device_markers=("v5p",),
+        lane_width=128,
+        # Conservative initial tiles; these are not benchmark-tuned on v5p.
+        vmem_bytes=16 * 1024 * 1024,
+        xla_vmem_bytes=64 * 1024 * 1024,
+        xla_vmem_reserve_bytes=64 * 1024,
+        collapse_blocks=(8, 16, 32, 64, 128),
+        highest_collapse_blocks=(8, 16, 32, 64),
+        gates_blocks=(512, 1024, 2048),
+        post_blocks=(8, 16, 32, 64, 128),
+    ),
+    MHCPlatform(
         name="TPU v6e",
         device_markers=("v6e", "v6 lite", "tpu v6"),
         lane_width=128,
@@ -38,7 +51,10 @@ _PLATFORMS = (
 
 
 def _platform_parameters(device_kind: str) -> MHCPlatform:
-    normalized = (device_kind or "").lower()
+    normalized = (device_kind or "").strip().lower()
+    # JAX reports v5p as "TPU v5", but v5e as "TPU v5 lite".
+    if normalized == "tpu v5":
+        normalized = "v5p"
     for platform in _PLATFORMS:
         if any(marker in normalized for marker in platform.device_markers):
             return platform

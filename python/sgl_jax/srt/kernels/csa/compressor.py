@@ -10,6 +10,8 @@ import jax.experimental.pallas as pl
 import jax.numpy as jnp
 from jax.experimental.pallas import tpu as pltpu
 
+from sgl_jax.srt.kernels.low_bit.formats import round_bf16
+
 from .tune import (
     CSA_ATTENTION_DIM,
     CSA_CACHE_PACKING,
@@ -62,6 +64,7 @@ def _csa_state_step_kernel(
     k_steps: int,
     norm_eps: float,
     record_kind: str,
+    projection_only: bool = False,
 ):
     """Project, update the overlap state, and pool a completed ratio-4 window."""
     k_step = pl.program_id(1)
@@ -79,6 +82,11 @@ def _csa_state_step_kernel(
 
     @pl.when(k_step == k_steps - 1)
     def _finish():
+        if projection_only:
+            # The V4 paged adapter owns scratch/snapshots. Expose the same
+            # original projection without updating the legacy state ABI.
+            value_ref[...] = projection_ref[...]
+            return
         batch = x_ref.shape[0]
         head_tiles = head_dim // TPU_V6E.vector_lanes
         projection_tiles = 2 * head_tiles
@@ -278,22 +286,44 @@ def _pool_uniform_groups(
     *,
     head_dim: int,
     norm_eps: float,
+    selected_windows=None,
+    numerical_mode="legacy",
 ):
     """Pool aligned ratio-4 groups, carrying the preceding group forward."""
-    groups = kv.shape[0]
-    initial_kv = initial_state[0, :COMPRESS_RATIO, 0].reshape(COMPRESS_RATIO, 2, head_dim)[:, 0]
-    initial_score = initial_state[0, :COMPRESS_RATIO, 1].reshape(COMPRESS_RATIO, 2, head_dim)[:, 0]
-    if groups == 1:
-        previous_kv = initial_kv[None]
-        previous_score = initial_score[None]
+    if selected_windows is not None:
+        # Request-aware V4 metadata supplies the previous/current channel
+        # halves explicitly; no alternative recurrent state pool is needed.
+        window_kv, window_score = selected_windows
+        groups = window_kv.shape[0]
     else:
-        previous_kv = jnp.concatenate((initial_kv[None], kv[:-1, :, :head_dim]), axis=0)
-        previous_score = jnp.concatenate((initial_score[None], score[:-1, :, :head_dim]), axis=0)
-    window_kv = jnp.concatenate((previous_kv, kv[:, :, head_dim:]), axis=1)
-    window_score = jnp.concatenate((previous_score, score[:, :, head_dim:]), axis=1)
+        groups = kv.shape[0]
+        initial_kv = initial_state[0, :COMPRESS_RATIO, 0].reshape(COMPRESS_RATIO, 2, head_dim)[:, 0]
+        initial_score = initial_state[0, :COMPRESS_RATIO, 1].reshape(COMPRESS_RATIO, 2, head_dim)[
+            :, 0
+        ]
+        if groups == 1:
+            previous_kv = initial_kv[None]
+            previous_score = initial_score[None]
+        else:
+            previous_kv = jnp.concatenate((initial_kv[None], kv[:-1, :, :head_dim]), axis=0)
+            previous_score = jnp.concatenate(
+                (initial_score[None], score[:-1, :, :head_dim]), axis=0
+            )
+        window_kv = jnp.concatenate((previous_kv, kv[:, :, head_dim:]), axis=1)
+        window_score = jnp.concatenate((previous_score, score[:, :, head_dim:]), axis=1)
     pooled = jnp.sum(window_kv * jax.nn.softmax(window_score, axis=1), axis=1)
-    pooled *= jax.lax.rsqrt(jnp.mean(jnp.square(pooled), axis=-1, keepdims=True) + norm_eps)
-    pooled *= norm_ref[...].reshape(1, head_dim).astype(jnp.float32)
+    norm = norm_ref[...].reshape(1, head_dim).astype(jnp.float32)
+    if numerical_mode == "v4":
+        pooled = round_bf16(pooled).astype(jnp.float32)
+        squared = pooled * pooled
+        while squared.shape[-1] > 1:
+            pairs = squared.reshape(groups, -1, 2)
+            squared = pairs[..., 0] + pairs[..., 1]
+        inverse = jax.lax.rsqrt(squared / jnp.float32(head_dim) + norm_eps)
+        pooled = round_bf16(pooled * inverse * norm).astype(jnp.float32)
+    else:
+        pooled *= jax.lax.rsqrt(jnp.mean(jnp.square(pooled), axis=-1, keepdims=True) + norm_eps)
+        pooled *= norm
     pairs = pooled[:, -CSA_ROPE_DIM:].reshape(groups, CSA_ROPE_FREQUENCY_DIM, 2)
     real, imag = pairs[..., 0], pairs[..., 1]
     rope = jnp.stack(
@@ -301,6 +331,319 @@ def _pool_uniform_groups(
         axis=-1,
     ).reshape(groups, CSA_ROPE_DIM)
     return jnp.concatenate((pooled[:, :-CSA_ROPE_DIM], rope), axis=-1)
+
+
+def _csa_v4_gemv_kernel(x_ref, weight_ref, out_ref, *, reduction_chunk):
+    """Retained V4 decode's v5p FP32 order, inside the original CSA module.
+
+    BF16 products are exact in FP32. Within each 1024-key main or 2048-key
+    index chunk, accumulate 128-lane vectors sequentially, then sixteen
+    eight-lane stripes sequentially, then halve eight lanes. Combine chunks
+    with an adjacent-pair tree. Cancellation probes and real projection bits
+    establish this order; a generic Mosaic sum or MXU dot is not equivalent.
+    """
+    product = x_ref[...].astype(jnp.float32) * weight_ref[...].astype(jnp.float32)
+    rows, hidden = product.shape
+    chunks = []
+    for begin in range(0, hidden, reduction_chunk):
+        lanes = product[:, begin : begin + 128]
+        for offset in range(128, reduction_chunk, 128):
+            lanes = lanes + product[:, begin + offset : begin + offset + 128]
+        stripes = lanes.reshape(rows, 16, 8)
+        reduced = stripes[:, 0]
+        for stripe in range(1, 16):
+            reduced = reduced + stripes[:, stripe]
+        for half in (4, 2, 1):
+            reduced = reduced[:, :half] + reduced[:, half : 2 * half]
+        chunks.append(reduced)
+    while len(chunks) > 1:
+        chunks = [chunks[i] + chunks[i + 1] for i in range(0, len(chunks), 2)]
+    out_ref[...] = chunks[0][:, 0][None]
+
+
+@functools.partial(jax.jit, static_argnames=("interpret", "projection_mode"))
+def csa_project_pallas(x, fused_weight, *, interpret=None, projection_mode="mxu"):
+    """Original CSA projection, independently tiled in N with full-K FP32.
+
+    The V4 adapter supplies position-aligned eight-row blocks. N tiling lets
+    full-K projection fit v5p VMEM without changing persistent FP32 state.
+    """
+    if x.ndim != 2 or x.dtype != jnp.bfloat16:
+        raise ValueError("CSA projection requires BF16 [tokens,hidden]")
+    tokens, hidden = x.shape
+    if fused_weight.ndim != 2 or fused_weight.shape[0] != hidden:
+        raise ValueError("CSA fused weight must be [hidden,width]")
+    width = fused_weight.shape[1]
+    if projection_mode not in ("mxu", "v4_gemv"):
+        raise ValueError("CSA projection mode must be mxu or v4_gemv")
+    if projection_mode == "v4_gemv":
+        if (tokens, hidden) != (1, 4096) or width not in (512, 2048):
+            raise ValueError("V4 GEMV requires one 4096-wide row and fused main/index weights")
+        tile_n = 128
+        # Each half is one retained wkv/wgate projection: widths 1024/256.
+        reduction_chunk = 1024 if width == 2048 else 2048
+        return pl.pallas_call(
+            functools.partial(_csa_v4_gemv_kernel, reduction_chunk=reduction_chunk),
+            grid=(width // tile_n,),
+            in_specs=(
+                pl.BlockSpec((1, hidden), lambda n: (0, 0)),
+                pl.BlockSpec((tile_n, hidden), lambda n: (n, 0)),
+            ),
+            out_specs=pl.BlockSpec((1, tile_n), lambda n: (0, n)),
+            out_shape=jax.ShapeDtypeStruct((1, width), jnp.float32),
+            compiler_params=pltpu.CompilerParams(dimension_semantics=("parallel",)),
+            interpret=_interpret_pallas() if interpret is None else interpret,
+            name=f"csa-compressor-project-gemv-k{hidden}-n{tile_n}-v4",
+        )(x, fused_weight.T.astype(jnp.bfloat16))
+    tile_b, tile_n = 8, min(width, 512)
+    if hidden % 128 or tile_n % 128 or width % tile_n or tokens < 1:
+        raise ValueError("CSA projection requires nonempty aligned dimensions")
+    padded = (tokens + tile_b - 1) // tile_b * tile_b
+    x = jnp.pad(x, ((0, padded - tokens), (0, 0)))
+
+    def kernel(x_ref, weight_ref, out_ref, projection_ref):
+        _csa_state_step_kernel(
+            x_ref,
+            None,
+            weight_ref,
+            None,
+            None,
+            None,
+            None,
+            None,
+            out_ref,
+            None,
+            None,
+            projection_ref,
+            head_dim=128,
+            k_steps=1,
+            norm_eps=CSA_NORM_EPS,
+            record_kind="projection",
+            projection_only=True,
+        )
+
+    return pl.pallas_call(
+        kernel,
+        grid_spec=pltpu.PrefetchScalarGridSpec(
+            num_scalar_prefetch=0,
+            grid=(padded // tile_b, 1, width // tile_n),
+            in_specs=(
+                pl.BlockSpec((tile_b, hidden), lambda b, k, n: (b, 0)),
+                pl.BlockSpec((hidden, tile_n), lambda b, k, n: (0, n)),
+            ),
+            out_specs=pl.BlockSpec((tile_b, tile_n), lambda b, k, n: (b, n)),
+            scratch_shapes=(pltpu.VMEM((tile_b, tile_n), jnp.float32),),
+        ),
+        out_shape=jax.ShapeDtypeStruct((padded, width), jnp.float32),
+        compiler_params=pltpu.CompilerParams(
+            dimension_semantics=("parallel", "arbitrary", "parallel"),
+            disable_bounds_checks=True,
+        ),
+        interpret=_interpret_pallas() if interpret is None else interpret,
+        name=f"csa-compressor-project-b8-k{hidden}-n{tile_n}-v4",
+    )(x, fused_weight.astype(jnp.bfloat16))[:tokens]
+
+
+@functools.partial(jax.jit, static_argnames=("interpret",))
+def csa_project_decode_pallas(x, fused_weight, *, interpret=None):
+    """Batch independent V4 GEMVs in one grid without changing their reduction.
+
+    This additive entry is not selected by the serving adapter. It accepts
+    only decode rows, not the eight-row MXU prefill arithmetic. Each program
+    invokes the unchanged single-row V4 body; neither K nor its FP32 reduction
+    tree is partitioned. Request validity/state ownership remain caller-owned.
+    """
+    if x.ndim != 2 or x.dtype != jnp.bfloat16 or x.shape[0] < 1 or x.shape[1] != 4096:
+        raise ValueError("V4 batched GEMV requires nonempty BF16 [tokens,4096]")
+    if (
+        fused_weight.ndim != 2
+        or fused_weight.shape[0] != 4096
+        or fused_weight.shape[1] not in (512, 2048)
+    ):
+        raise ValueError("V4 batched GEMV requires fused [4096,512 or 2048] weights")
+    tokens, hidden = x.shape
+    width, tile_n = fused_weight.shape[1], 128
+    result = pl.pallas_call(
+        functools.partial(
+            _csa_v4_gemv_kernel, reduction_chunk=1024 if width == 2048 else 2048
+        ),
+        grid=(tokens, width // tile_n),
+        in_specs=(
+            # A mapped leading token axis leaves the same [1,K] reference
+            # as the accepted single-row body. A [1,K] block directly in
+            # [B,K] would violate TPU's eight-row DMA alignment for B > 1.
+            pl.BlockSpec((None, 1, hidden), lambda token, n: (token, 0, 0)),
+            pl.BlockSpec((tile_n, hidden), lambda token, n: (n, 0)),
+        ),
+        out_specs=pl.BlockSpec((None, 1, tile_n), lambda token, n: (token, 0, n)),
+        out_shape=jax.ShapeDtypeStruct((tokens, 1, width), jnp.float32),
+        compiler_params=pltpu.CompilerParams(dimension_semantics=("parallel", "parallel")),
+        interpret=_interpret_pallas() if interpret is None else interpret,
+        name=f"csa-compressor-project-decode-batched-k{hidden}-n{tile_n}-v4",
+    )(x[:, None, :], fused_weight.T.astype(jnp.bfloat16))
+    return result[:, 0, :]
+
+
+def _csa_emit_selected_kernel(
+    values_ref, scores_ref, norm_ref, phase_ref, valid_ref, out_ref, *, head_dim, norm_eps
+):
+    phase = phase_ref[:, 0]
+    emitted = _pool_uniform_groups(
+        None,
+        None,
+        None,
+        norm_ref,
+        phase[:, :32],
+        phase[:, 32:64],
+        head_dim=head_dim,
+        norm_eps=norm_eps,
+        selected_windows=(values_ref[...], scores_ref[...]),
+        numerical_mode="v4",
+    )
+    out_ref[...] = jnp.where(
+        valid_ref[:, 0, 0][:, None, None],
+        round_bf16(emitted).reshape(out_ref.shape),
+        0,
+    )
+
+
+@functools.partial(jax.jit, static_argnames=("norm_eps", "interpret"))
+def csa_emit_selected_pallas(
+    values, scores, norm_weight, cos_sin, valid, *, norm_eps=CSA_NORM_EPS, interpret=None
+):
+    """Original overlap pool/norm/RoPE with V4 boundaries and owned snapshots.
+
+    Output is BF16 before the model's existing main FP8 or Hadamard/FP4 QAT.
+    This does not silently reinterpret that KV as the legacy packed-FP8 ABI.
+    """
+    if values.ndim != 3 or values.shape[1] != STATE_SLOTS or scores.shape != values.shape:
+        raise ValueError("CSA selected windows must be [groups,8,head_dim]")
+    entries, _, head_dim = values.shape
+    if entries < 1 or head_dim not in (128, 512) or norm_weight.shape != (head_dim,):
+        raise ValueError("CSA emitter requires nonempty groups and head_dim 128 or 512")
+    if values.dtype != jnp.float32 or scores.dtype != jnp.float32:
+        raise ValueError("CSA persistent projection state must stay FP32")
+    if cos_sin.shape != (entries, 64) or valid.shape != (entries,):
+        raise ValueError("CSA phase/valid must be [groups,64] and [groups]")
+    tile = 4
+    pad = (-entries) % tile
+    values = jnp.pad(values, ((0, pad), (0, 0), (0, 0)))
+    scores = jnp.pad(scores, ((0, pad), (0, 0), (0, 0)))
+    phase = jnp.pad(cos_sin.astype(jnp.float32), ((0, pad), (0, 64)))[:, None]
+    live = jnp.broadcast_to(jnp.pad(valid, (0, pad))[:, None, None], (entries + pad, 8, 128))
+    return pl.pallas_call(
+        functools.partial(_csa_emit_selected_kernel, head_dim=head_dim, norm_eps=float(norm_eps)),
+        grid=((entries + pad) // tile,),
+        in_specs=(
+            pl.BlockSpec((tile, 8, head_dim), lambda i: (i, 0, 0)),
+            pl.BlockSpec((tile, 8, head_dim), lambda i: (i, 0, 0)),
+            pl.BlockSpec((head_dim // 128, 128), lambda i: (0, 0)),
+            pl.BlockSpec((tile, 1, 128), lambda i: (i, 0, 0)),
+            pl.BlockSpec((tile, 8, 128), lambda i: (i, 0, 0)),
+        ),
+        out_specs=pl.BlockSpec((tile, head_dim // 128, 128), lambda i: (i, 0, 0)),
+        out_shape=jax.ShapeDtypeStruct((entries + pad, head_dim // 128, 128), jnp.bfloat16),
+        compiler_params=pltpu.CompilerParams(disable_bounds_checks=True),
+        interpret=_interpret_pallas() if interpret is None else interpret,
+        name=f"csa-compressor-snapshot-d{head_dim}-v4",
+    )(values, scores, norm_weight.reshape(head_dim // 128, 128), phase, live).reshape(
+        entries + pad, head_dim
+    )[:entries]
+
+
+def _select_overlap_channels(window, *, head_dim):
+    """Select previous/current halves in VMEM, without a staged HBM gather."""
+    flat = window.reshape(-1, 2 * head_dim)
+    # Build the row predicate in its final 2-D layout. Mosaic cannot reshape
+    # the short 1-D i1 iota predicate into [rows,1] on this v5p stack.
+    rows = jax.lax.broadcasted_iota(jnp.int32, (flat.shape[0], head_dim), 0)
+    current = rows % STATE_SLOTS >= COMPRESS_RATIO
+    selected = jnp.where(current, flat[:, head_dim:], flat[:, :head_dim])
+    return selected.reshape(window.shape[0], STATE_SLOTS, head_dim)
+
+
+def _csa_emit_overlap_kernel(
+    values_ref, scores_ref, norm_ref, phase_ref, valid_ref, out_ref, *, head_dim, norm_eps
+):
+    values = _select_overlap_channels(values_ref[...], head_dim=head_dim)
+    scores = _select_overlap_channels(scores_ref[...], head_dim=head_dim)
+    live = valid_ref[:, 0, 0]
+    scores = jnp.where(live[:, None, None], scores, 0)
+    phase = phase_ref[:, 0]
+    emitted = _pool_uniform_groups(
+        None,
+        None,
+        None,
+        norm_ref,
+        phase[:, :32],
+        phase[:, 32:64],
+        head_dim=head_dim,
+        norm_eps=norm_eps,
+        selected_windows=(values, scores),
+        numerical_mode="v4",
+    )
+    out_ref[...] = jnp.where(live[:, None, None], round_bf16(emitted).reshape(out_ref.shape), 0)
+
+
+@functools.partial(jax.jit, static_argnames=("norm_eps", "interpret", "tile_groups"))
+def csa_emit_overlap_pallas(
+    values,
+    scores,
+    norm_weight,
+    cos_sin,
+    valid,
+    *,
+    norm_eps=CSA_NORM_EPS,
+    interpret=None,
+    tile_groups=1,
+):
+    """V4 emission directly from raw FP32 `[groups,8,2D]` overlap windows.
+
+    Channel selection, invalid-group masking, pooling, V4 BF16 boundaries,
+    normalization and RoPE execute in one Pallas program. Projection and
+    request/page ownership are deliberately not changed. This produces the
+    same BF16 output as `csa_emit_selected_pallas`, before existing FP8/FP4 QAT.
+    The default single-group tile avoids materializing padded raw FP32
+    windows in HBM; larger independently validated tiles remain opt-in.
+    """
+    if values.ndim != 3 or values.shape[1] != STATE_SLOTS or scores.shape != values.shape:
+        raise ValueError("CSA raw overlap windows must be [groups,8,2*head_dim]")
+    entries, _, width = values.shape
+    head_dim = width // 2
+    if entries < 1 or width not in (256, 1024) or norm_weight.shape != (head_dim,):
+        raise ValueError("CSA overlap emitter requires nonempty groups and head_dim 128 or 512")
+    if values.dtype != jnp.float32 or scores.dtype != jnp.float32:
+        raise ValueError("CSA raw overlap windows must stay FP32")
+    if cos_sin.shape != (entries, 64) or valid.shape != (entries,) or valid.dtype != jnp.bool_:
+        raise ValueError("CSA overlap phase/valid must be [groups,64] and bool[groups]")
+    if tile_groups not in (1, 2, 4, 8):
+        raise ValueError("CSA overlap tile_groups must be 1, 2, 4 or 8")
+    tile = tile_groups
+    pad = (-entries) % tile
+    values = jnp.pad(values, ((0, pad), (0, 0), (0, 0)))
+    scores = jnp.pad(scores, ((0, pad), (0, 0), (0, 0)))
+    phase = jnp.pad(cos_sin.astype(jnp.float32), ((0, pad), (0, 64)))[:, None]
+    live = jnp.broadcast_to(jnp.pad(valid, (0, pad))[:, None, None], (entries + pad, 8, 128))
+    return pl.pallas_call(
+        functools.partial(_csa_emit_overlap_kernel, head_dim=head_dim, norm_eps=float(norm_eps)),
+        grid=((entries + pad) // tile,),
+        in_specs=(
+            pl.BlockSpec((tile, 8, width), lambda i: (i, 0, 0)),
+            pl.BlockSpec((tile, 8, width), lambda i: (i, 0, 0)),
+            pl.BlockSpec((head_dim // 128, 128), lambda i: (0, 0)),
+            pl.BlockSpec((tile, 1, 128), lambda i: (i, 0, 0)),
+            pl.BlockSpec((tile, 8, 128), lambda i: (i, 0, 0)),
+        ),
+        out_specs=pl.BlockSpec((tile, head_dim // 128, 128), lambda i: (i, 0, 0)),
+        out_shape=jax.ShapeDtypeStruct((entries + pad, head_dim // 128, 128), jnp.bfloat16),
+        compiler_params=pltpu.CompilerParams(disable_bounds_checks=True),
+        interpret=_interpret_pallas() if interpret is None else interpret,
+        name=f"csa-compressor-snapshot-d{head_dim}-v4-overlap-t{tile}",
+    )(values, scores, norm_weight.reshape(head_dim // 128, 128), phase, live).reshape(
+        entries + pad, head_dim
+    )[
+        :entries
+    ]
 
 
 def _csa_dual_uniform_prefill_kernel(
@@ -464,7 +807,9 @@ def csa_dual_uniform_prefill_pallas(
         raise ValueError("compressor norm shapes are invalid")
     if cos.shape != (batch, groups, CSA_ROPE_FREQUENCY_DIM) or sin.shape != cos.shape:
         raise ValueError("cos and sin must be [batch,groups,32]")
-    tile_k = get_csa_compressor_projection_k_tile(hidden, batch * sequence)
+    tile_k = get_csa_compressor_projection_k_tile(
+        hidden, batch * sequence, device_kind=jax.devices()[0].device_kind
+    )
     k_steps = hidden // tile_k
     main_tiles = main_projected // TPU_V6E.vector_lanes
     index_tiles = index_projected // TPU_V6E.vector_lanes
@@ -653,7 +998,9 @@ def csa_state_step_fused_pallas(
     pad = padded_batch - batch
     head_tiles = head_dim // TPU_V6E.vector_lanes
     projection_tiles = projected_dim // TPU_V6E.vector_lanes
-    tile_k = get_csa_compressor_projection_k_tile(hidden, batch)
+    tile_k = get_csa_compressor_projection_k_tile(
+        hidden, batch, device_kind=jax.devices()[0].device_kind
+    )
     k_steps = hidden // tile_k
     x_t = jnp.pad(x_t.astype(jnp.bfloat16), ((0, pad), (0, 0)))
     state_pool = jnp.pad(

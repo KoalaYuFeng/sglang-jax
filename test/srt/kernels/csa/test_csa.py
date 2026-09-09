@@ -153,7 +153,7 @@ def _validate_backend(mesh):
     assert state_pool.get_csa_states(0)[0] is updates[0]
 
 
-def _validate_complete_step(query_lengths, seq_lens, *, uniform_prefill, seed):
+def _validate_complete_step(query_lengths, seq_lens, *, uniform_prefill, seed, mesh=None):
     rng = np.random.default_rng(seed)
     batch = len(query_lengths)
     hidden = TPU_V6E.vector_lanes
@@ -371,6 +371,7 @@ def _validate_complete_step(query_lengths, seq_lens, *, uniform_prefill, seed):
         query_lengths,
         query_start_slots=tuple(int(value) for value in prefixes % CSA_COMPRESSION_RATIO),
         uniform_prefill=uniform_prefill,
+        mesh=mesh,
     )
     actual = step(
         jnp.asarray(compressor_input, jnp.bfloat16),
@@ -424,6 +425,18 @@ def _validate_complete_step(query_lengths, seq_lens, *, uniform_prefill, seed):
     jax.block_until_ready(actual)
     output, topk, actual_main_state, actual_index_state = actual[:4]
     actual_nope, actual_rope, actual_index, actual_window = actual[4:]
+    if mesh is not None and mesh.size > 1:
+        assert output.sharding.spec == jax.sharding.PartitionSpec(None, "tensor", None)
+        assert len(output.addressable_shards) == mesh.size
+        for shard in output.addressable_shards:
+            assert shard.data.shape == (tokens, CSA_INDEX_HEADS // mesh.size, CSA_ATTENTION_DIM)
+        # These values depend only on replicated inputs, even when Q is TP.
+        # Verify each physical replica, not only the first device_get result.
+        for value in actual[1:]:
+            assert value.is_fully_replicated
+            reference_replica = np.asarray(value.addressable_shards[0].data)
+            for shard in value.addressable_shards[1:]:
+                np.testing.assert_array_equal(np.asarray(shard.data), reference_replica)
     np.testing.assert_array_equal(
         np.sort(np.asarray(topk), axis=-1),
         np.sort(expected_topk, axis=-1),
@@ -464,10 +477,27 @@ def test_csa_end_to_end_matches_numpy():
             jax.sharding.AxisType.Explicit,
         ),
     )
-    _validate_complete_step((1,), (4096,), uniform_prefill=False, seed=2030)
-    _validate_complete_step((128,), (128,), uniform_prefill=True, seed=2031)
-    _validate_complete_step((1, 4), (4096, 4096), uniform_prefill=False, seed=2032)
-    _validate_complete_step((4,), (4097,), uniform_prefill=False, seed=2033)
-    _validate_complete_step((2, 5), (4097, 4102), uniform_prefill=False, seed=2034)
-    _validate_complete_step((7,), (7,), uniform_prefill=True, seed=2035)
-    _validate_backend(mesh)
+    # Do not inherit import-time meshes from unrelated test modules.
+    with jax.set_mesh(mesh):
+        _validate_complete_step((1,), (4096,), uniform_prefill=False, seed=2030, mesh=mesh)
+        _validate_complete_step((128,), (128,), uniform_prefill=True, seed=2031, mesh=mesh)
+        _validate_complete_step((1, 4), (4096, 4096), uniform_prefill=False, seed=2032, mesh=mesh)
+        _validate_complete_step((4,), (4097,), uniform_prefill=False, seed=2033, mesh=mesh)
+        _validate_complete_step((2, 5), (4097, 4102), uniform_prefill=False, seed=2034, mesh=mesh)
+        _validate_complete_step((7,), (7,), uniform_prefill=True, seed=2035, mesh=mesh)
+        _validate_backend(mesh)
+
+
+@pytest.mark.skipif(jax.device_count() < 4, reason="requires four TPU devices")
+def test_csa_tensor_parallel_matches_numpy():
+    """Exercise all heads, non-identity Top-K, ragged input and cache updates."""
+    mesh = jax.sharding.Mesh(
+        np.asarray(jax.devices()[:4], object).reshape(1, 4),
+        ("data", "tensor"),
+        axis_types=(jax.sharding.AxisType.Explicit, jax.sharding.AxisType.Explicit),
+    )
+    with jax.set_mesh(mesh):
+        _validate_complete_step((1,), (4096,), uniform_prefill=False, seed=2030, mesh=mesh)
+        _validate_complete_step((128,), (128,), uniform_prefill=True, seed=2031, mesh=mesh)
+        _validate_complete_step((2, 5), (4097, 4102), uniform_prefill=False, seed=2034, mesh=mesh)
+        _validate_backend(mesh)

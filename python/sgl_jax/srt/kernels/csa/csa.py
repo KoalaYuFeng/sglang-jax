@@ -5,6 +5,8 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 import numpy as np
+from jax.sharding import NamedSharding
+from jax.sharding import PartitionSpec as P
 
 from sgl_jax.srt.kernels.csa.compressor import (
     csa_dual_state_step_cache,
@@ -18,9 +20,9 @@ from sgl_jax.srt.kernels.csa.joint_attention import (
     blocked_ragged_joint_attention_pallas,
     joint_attention_pallas,
 )
+from sgl_jax.srt.kernels.csa.sharding import validate_csa_mesh
 from sgl_jax.srt.kernels.csa.tune import (
     CSA_ATTENTION_DIM,
-    CSA_ATTENTION_HEADS,
     CSA_CACHE_PACKING,
     CSA_COMPRESSION_RATIO,
     CSA_DEFAULT_PAGE_SIZE,
@@ -360,6 +362,7 @@ def build_csa_step(
     query_start_slots: tuple[int, ...],
     uniform_prefill: bool,
     softmax_scale: float = CSA_ATTENTION_DIM**-0.5,
+    mesh: jax.sharding.Mesh | None = None,
 ):
     """Specialize and JIT one complete CSA step for static request lengths."""
     if not query_lengths or len(query_start_slots) != len(query_lengths):
@@ -372,7 +375,9 @@ def build_csa_step(
         raise ValueError("uniform prefill must start at a compression-group boundary")
     maximum_query = max(query_lengths)
     workload_case = "decode" if maximum_query == 1 else ("prefill" if uniform_prefill else "mixed")
-    _, attention_block = get_csa_attention_schedule(sum(query_lengths))
+    devices = np.asarray(mesh.devices).reshape(-1) if mesh is not None else jax.devices()
+    device_kind = devices[0].device_kind
+    _, attention_block = get_csa_attention_schedule(sum(query_lengths), device_kind=device_kind)
     indexer_schedule = get_csa_indexer_schedule(
         prefill_query_length=maximum_query,
         mixed_max_query_length=maximum_query,
@@ -390,14 +395,13 @@ def build_csa_step(
             valid = local < query_length
             query_block_tokens.append(np.where(valid, token_starts[request] + local, 0))
             query_block_valid.append(valid)
-    query_block_requests = jnp.asarray(query_block_requests, jnp.int32)
-    query_block_offsets = jnp.asarray(query_block_offsets, jnp.int32)
-    query_block_tokens = jnp.asarray(np.asarray(query_block_tokens), jnp.int32)
-    query_block_valid = jnp.asarray(np.asarray(query_block_valid))
-    valid_block_rows = jnp.asarray(
-        np.flatnonzero(np.asarray(query_block_valid).reshape(-1)),
-        jnp.int32,
-    )
+    # Keep specialization metadata on the host until tracing rank-local code.
+    # shard_map cannot close over arrays carrying outer Explicit mesh axes.
+    query_block_requests = np.asarray(query_block_requests, np.int32)
+    query_block_offsets = np.asarray(query_block_offsets, np.int32)
+    query_block_tokens = np.asarray(query_block_tokens, np.int32)
+    query_block_valid = np.asarray(query_block_valid, np.bool_)
+    valid_block_rows = np.flatnonzero(query_block_valid.reshape(-1)).astype(np.int32)
 
     def run(
         x,
@@ -505,6 +509,7 @@ def build_csa_step(
         selected_tile, token_tile = get_csa_attention_schedule(
             attention_q.shape[0],
             shared_window=use_shared_window,
+            device_kind=device_kind,
         )
         selected_tile = min(selected_tile, CSA_TOP_K)
         if use_shared_window:
@@ -546,7 +551,7 @@ def build_csa_step(
                 scale=softmax_scale,
                 selected_tile=selected_tile,
             )
-            output = block_output.reshape(-1, CSA_ATTENTION_HEADS, CSA_ATTENTION_DIM)[
+            output = block_output.reshape(-1, attention_q.shape[1], CSA_ATTENTION_DIM)[
                 valid_block_rows
             ]
         else:
@@ -576,6 +581,32 @@ def build_csa_step(
             index_cache,
             window_cache,
         )
+
+    if mesh is not None:
+        validate_csa_mesh(mesh)
+        tensor_axis = "tensor" if "tensor" in mesh.axis_names else None
+        in_specs = [P()] * 26
+        in_specs[17] = P(None, tensor_axis, None)  # attention queries
+        in_specs[19] = P(tensor_axis)  # per-head attention sink
+        sharded_run = jax.shard_map(
+            run,
+            mesh=mesh,
+            in_specs=tuple(in_specs),
+            out_specs=(P(None, tensor_axis, None),) + (P(),) * 7,
+            # Pallas calls are opaque to replication analysis. All outputs
+            # other than attention depend exclusively on replicated inputs;
+            # the Lightning Indexer must retain all 64 of its own heads.
+            check_vma=False,
+        )
+
+        def run(*args):
+            # Explicit meshes require inputs to match in_specs before entering
+            # shard_map. Accept either already-sharded or replicated callers.
+            args = tuple(
+                jax.sharding.reshard(value, NamedSharding(mesh, spec))
+                for value, spec in zip(args, in_specs, strict=True)
+            )
+            return sharded_run(*args)
 
     return jax.jit(run, donate_argnums=(20, 21, 22, 23, 24, 25))
 

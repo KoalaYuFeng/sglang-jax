@@ -32,7 +32,10 @@ def get_slot_mapping(
     return slot_mapping.astype(jnp.int32)
 
 
-VMEM_SIZE = 64 * 1024 * 1024  # 32MB
+VMEM_SIZE = 64 * 1024 * 1024  # 64 MiB compiler budget
+# XLA reserves 64 KiB inside vmem_limit_bytes. A scratch allocation that fills
+# the entire budget fails compilation, even when the TPU has sufficient VMEM.
+VMEM_SCRATCH_SIZE = VMEM_SIZE - 64 * 1024
 
 
 def get_num_slices_per_block(new_kv: jax.Array, kv_cache: jax.Array, page_size=128):
@@ -56,7 +59,9 @@ def get_num_slices_per_block(new_kv: jax.Array, kv_cache: jax.Array, page_size=1
     kv_head_num = new_kv.shape[2] * new_kv.shape[3]
     head_dim = new_kv.shape[4]
 
-    max_num_slices_per_block = VMEM_SIZE // (bytes_per_element * page_size * kv_head_num * head_dim)
+    max_num_slices_per_block = VMEM_SCRATCH_SIZE // (
+        bytes_per_element * page_size * kv_head_num * head_dim
+    )
     assert (
         max_num_slices_per_block > 0
     ), f"max_num_slices_per_block={max_num_slices_per_block} is not greater than 0"

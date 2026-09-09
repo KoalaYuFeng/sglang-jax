@@ -10,6 +10,9 @@ import jax.experimental.pallas as pl
 import jax.numpy as jnp
 from jax.experimental.pallas import tpu as pltpu
 
+from sgl_jax.srt.kernels.hca.attention import _v4_probability_sum_64
+from sgl_jax.srt.kernels.low_bit.formats import round_bf16
+
 from .tune import (
     CSA_ATTENTION_DIM,
     CSA_CACHE_PACKING,
@@ -95,6 +98,7 @@ def _joint_attention_kernel(
     selected_steps: int,
     selected_tile: int,
     softmax_scale: float,
+    numerical_mode: str = "legacy",
 ):
     """Stream SWA and selected compressed records through one softmax state."""
     program = pl.program_id(0)
@@ -105,7 +109,7 @@ def _joint_attention_kernel(
         sink_ref[...].astype(jnp.float32)[None, :, None],
         (block_tokens, heads, 1),
     ).reshape(block_tokens * heads, 1)
-    negative_finite = jnp.finfo(jnp.float32).min
+    negative_finite = -1e30 if numerical_mode == "v4" else jnp.finfo(jnp.float32).min
     maximum_ref[...] = jnp.full(maximum_ref.shape, negative_finite, jnp.float32)
     denominator_ref[...] = jnp.zeros(denominator_ref.shape, jnp.float32)
     accumulator_ref[...] = jnp.zeros(accumulator_ref.shape, jnp.float32)
@@ -119,7 +123,7 @@ def _joint_attention_kernel(
         def finish(token, probability, token_kv, alpha, next_maximum, next_denominator):
             rows = pl.ds(token * heads, heads)
             value = jax.lax.dot_general(
-                probability,
+                round_bf16(probability) if numerical_mode == "v4" else probability,
                 token_kv.astype(jnp.bfloat16),
                 (((1,), (0,)), ((), ())),
                 preferred_element_type=jnp.float32,
@@ -150,8 +154,10 @@ def _joint_attention_kernel(
             alpha = jnp.exp(maximum - next_maximum)
             probability = jnp.where(valid[token][None, :], jnp.exp(scores - next_maximum), 0.0)
             denominator_storage = denominator_ref[rows]
-            next_denominator = alpha * denominator_storage[:, :1] + jnp.sum(
-                probability, axis=1, keepdims=True
+            next_denominator = alpha * denominator_storage[:, :1] + (
+                _v4_probability_sum_64(probability)
+                if numerical_mode == "v4"
+                else jnp.sum(probability, axis=1, keepdims=True)
             )
             if previous is not None:
                 previous_value = finish(*previous)
@@ -166,12 +172,19 @@ def _joint_attention_kernel(
 
         finish(*previous)
 
-    consume(window_ref[...].astype(jnp.bfloat16), window_valid_ref[:, 0, ...])
+    if numerical_mode == "v4":
+        consume(window_ref[:, :64], window_valid_ref[:, 0, :64])
+        consume(window_ref[:, 64:], window_valid_ref[:, 0, 64:])
+    else:
+        consume(window_ref[...].astype(jnp.bfloat16), window_valid_ref[:, 0, ...])
 
-    def selected_step(nope_ref, rope_ref):
+    def selected_step(nope_ref, rope_ref=None):
         step = pl.program_id(0)
-        nope, rope = _decode_packed_selected(nope_ref[...], rope_ref[...])
-        kv = jnp.concatenate((nope, rope), axis=-1)
+        if numerical_mode == "v4":
+            kv = nope_ref[...]
+        else:
+            nope, rope = _decode_packed_selected(nope_ref[...], rope_ref[...])
+            kv = jnp.concatenate((nope, rope), axis=-1)
         selected_index = step * selected_tile + jnp.arange(selected_tile, dtype=jnp.int32)
         consume(kv, selected_index[None, :] < selected_lengths[:, None])
 
@@ -189,17 +202,31 @@ def _joint_attention_kernel(
             lambda step: (program, step, 0),
         ),
     )
+    selected_inputs = (selected_nope_hbm_ref, selected_rope_hbm_ref)
+    if numerical_mode == "v4":
+        selected_specs = (
+            pl.BlockSpec(
+                (block_tokens, selected_tile, CSA_ATTENTION_DIM),
+                lambda step: (program, step, 0),
+            ),
+        )
+        selected_inputs = (selected_nope_hbm_ref,)
 
     pltpu.emit_pipeline(
         selected_step,
         grid=(selected_steps,),
         in_specs=selected_specs,
         dimension_semantics=("arbitrary",),
-    )(
-        selected_nope_hbm_ref,
-        selected_rope_hbm_ref,
-    )
+    )(*selected_inputs)
     maximum = maximum_ref[...][:, :1]
+    if numerical_mode == "v4":
+        final_maximum = jnp.maximum(maximum, sink)
+        rescale = jnp.exp(maximum - final_maximum)
+        denominator = denominator_ref[...][:, :1] * rescale + jnp.exp(sink - final_maximum)
+        out_ref[...] = round_bf16(accumulator_ref[...] * rescale / denominator).reshape(
+            block_tokens, heads, head_dim
+        )
+        return
     denominator = denominator_ref[...][:, :1] + jnp.exp(sink - maximum)
     out_ref[...] = (
         (accumulator_ref[...] * pl.reciprocal(denominator, approx=True))
@@ -215,6 +242,7 @@ def _joint_attention_kernel(
         "selected_tile",
         "tokens_per_program",
         "interpret",
+        "numerical_mode",
     ),
 )
 def joint_attention_pallas(
@@ -230,8 +258,12 @@ def joint_attention_pallas(
     selected_tile: int = ATTENTION_SELECTED_TILE,
     tokens_per_program: int = ATTENTION_TOKEN_TILE,
     interpret: bool | None = None,
+    numerical_mode: str = "legacy",
 ):
     """Fuse SWA and cache-native selected attention into one online softmax."""
+    if numerical_mode not in ("legacy", "v4"):
+        raise ValueError("CSA attention numerical_mode must be legacy or v4")
+    bf16_cache = numerical_mode == "v4"
     if q.ndim != 3 or q.dtype != jnp.bfloat16:
         raise ValueError("q must be BF16 [tokens,heads,512]")
     tokens, heads, head_dim = q.shape
@@ -243,7 +275,18 @@ def joint_attention_pallas(
         raise ValueError("window_kv must use BF16 with width 512")
     if window_kv.shape[1] > CSA_WINDOW_SIZE or window_valid.shape != window_kv.shape[:2]:
         raise ValueError("window_valid must match a window of at most 128 rows")
-    if selected_nope.ndim == 2:
+    if bf16_cache:
+        if selected_nope.ndim != 3 or selected_nope.shape[0] != tokens:
+            raise ValueError("V4 selected KV must be BF16 [tokens,selected,512]")
+        if selected_nope.dtype != jnp.bfloat16 or selected_nope.shape[2] != head_dim:
+            raise ValueError("V4 selected KV must keep its explicit BF16/QAT ABI")
+        if selected_rope is not None:
+            raise ValueError("V4 BF16 selected KV already includes RoPE; pass selected_rope=None")
+        selected = selected_nope.shape[1]
+        # Keep the original outer program's argument list; the V4 pipeline
+        # consumes only selected_nope and never loads this empty-meaning bridge.
+        selected_rope = jnp.zeros((tokens, 1, 128), jnp.int32)
+    elif selected_nope.ndim == 2:
         if selected_nope.shape[0] % tokens:
             raise ValueError("packed NoPE rows must be divisible by tokens")
         selected = selected_nope.shape[0] // tokens
@@ -252,14 +295,14 @@ def joint_attention_pallas(
         selected = selected_nope.shape[1]
     else:
         raise ValueError("packed NoPE must be int32 [tokens*selected,128]")
-    if (
+    if not bf16_cache and (
         selected_nope.dtype != jnp.int32
         or selected < 1
         or selected_nope.shape[2] != TPU_V6E.vector_lanes
         or selected % CSA_CACHE_PACKING
     ):
         raise ValueError("packed NoPE requires int32 records and selected divisible by four")
-    if selected_rope.ndim == 2:
+    if not bf16_cache and selected_rope.ndim == 2:
         if selected_rope.shape != (
             tokens * selected // CSA_CACHE_PACKING,
             TPU_V6E.vector_lanes,
@@ -270,7 +313,7 @@ def joint_attention_pallas(
             selected // CSA_CACHE_PACKING,
             TPU_V6E.vector_lanes,
         )
-    if (
+    if not bf16_cache and (
         selected_rope.shape
         != (
             tokens,
@@ -285,7 +328,13 @@ def joint_attention_pallas(
     selected_lengths = selected_valid.astype(jnp.int32)
     if sink.shape != (heads,):
         raise ValueError("sink must be [heads]")
-    if selected_tile < TPU_V6E.vector_lanes or selected_tile % TPU_V6E.vector_lanes:
+    if bf16_cache and (selected < 1 or selected_tile != 64 or tokens_per_program != 1):
+        raise ValueError(
+            "V4 CSA attention requires nonempty KV, 64-key tiles and one query/program"
+        )
+    if not bf16_cache and (
+        selected_tile < TPU_V6E.vector_lanes or selected_tile % TPU_V6E.vector_lanes
+    ):
         raise ValueError("selected_tile must be a positive multiple of 128")
     maximum_token_tile = PIPELINE_BUFFERS * TPU_V6E.sublanes
     if tokens_per_program < 1 or tokens_per_program > maximum_token_tile:
@@ -320,7 +369,7 @@ def joint_attention_pallas(
             (0, token_pad),
             (
                 0,
-                selected_pad // CSA_CACHE_PACKING,
+                0 if bf16_cache else selected_pad // CSA_CACHE_PACKING,
             ),
             (0, 0),
         ),
@@ -345,6 +394,7 @@ def joint_attention_pallas(
             selected_steps=selected_steps,
             selected_tile=selected_tile,
             softmax_scale=float(scale),
+            numerical_mode=numerical_mode,
         ),
         grid_spec=pltpu.PrefetchScalarGridSpec(
             num_scalar_prefetch=0,
@@ -392,7 +442,8 @@ def joint_attention_pallas(
             disable_bounds_checks=True,
         ),
         interpret=interpret,
-        name=(f"csa-joint-attention-b{block_tokens}-k{selected_tile}-h{padded_heads}-d{head_dim}"),
+        name=(f"csa-joint-attention-b{block_tokens}-k{selected_tile}-h{padded_heads}-d{head_dim}")
+        + ("-v4" if bf16_cache else ""),
     )(
         q,
         window_kv,

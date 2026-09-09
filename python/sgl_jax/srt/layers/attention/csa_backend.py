@@ -14,6 +14,7 @@ from jax.sharding import PartitionSpec as P
 from jax.tree_util import register_pytree_node_class
 
 from sgl_jax.srt.kernels.csa.csa import build_csa_step
+from sgl_jax.srt.kernels.csa.sharding import validate_csa_mesh
 from sgl_jax.srt.kernels.csa.tune import (
     CSA_ATTENTION_DIM,
     CSA_ATTENTION_HEADS,
@@ -80,7 +81,7 @@ class CSABackendMetadata(AttentionBackendMetadata):
 
 @dataclass
 class CSABackend(AttentionBackend):
-    """Run the complete single-device CSA operator family."""
+    """Run CSA with tensor-parallel attention and replicated shared KV."""
 
     def __init__(
         self,
@@ -92,8 +93,7 @@ class CSABackend(AttentionBackend):
         compress_ratio: int = CSA_COMPRESSION_RATIO,
         mesh: jax.sharding.Mesh,
     ):
-        if mesh is None or mesh.size != 1:
-            raise ValueError("CSABackend currently requires a single-device mesh")
+        validate_csa_mesh(mesh)
         if (
             num_attn_heads != CSA_ATTENTION_HEADS
             or head_dim != CSA_ATTENTION_DIM
@@ -365,6 +365,7 @@ class CSABackend(AttentionBackend):
             query_start_slots=metadata.query_start_slots,
             uniform_prefill=metadata.uniform_prefill,
             softmax_scale=scale,
+            mesh=self.mesh,
         )
         (
             output,

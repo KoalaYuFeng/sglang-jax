@@ -64,6 +64,26 @@ class _HCAPlatformParameters:
 # Values in this table are hardware schedules, not HCA model semantics. The v6e
 # row is measured by benchmark/kernels/hca/bench_hca.py.
 _PLATFORMS = (
+    # Bring-up schedule: v5p's default scoped allocation limit is 16 MiB.
+    # Unlike the v6e row, these values are not benchmark-selected.
+    _HCAPlatformParameters(
+        name="TPU v5p",
+        device_markers=("v5p",),
+        mxu_lanes=128,
+        sublanes=8,
+        vmem_bytes=16 * 1024 * 1024,
+        projection_k_tile=512,
+        projection_batch_tile_max=64,
+        # RoPE/output entry blocks must be 8-row aligned when tiled.
+        prefill_entries_per_step=8,
+        cache_write_tile=8,
+        boundary_tiles=(4, 8),
+        query_block_size=16,
+        query_compute_block_size=8,
+        swa_dma_tile=512,
+        swa_compute_tile=256,
+        compressed_tiles=(128, 256, 512, 1024),
+    ),
     _HCAPlatformParameters(
         name="TPU v6e",
         device_markers=("v6e", "v6 lite", "tpu v6"),
@@ -86,6 +106,8 @@ _PLATFORMS = (
 
 def _platform_parameters(device_kind: str) -> _HCAPlatformParameters:
     normalized = device_kind.strip().lower()
+    if normalized == "tpu v5":
+        normalized = "v5p"
     for platform in _PLATFORMS:
         if any(marker in normalized for marker in platform.device_markers):
             return platform

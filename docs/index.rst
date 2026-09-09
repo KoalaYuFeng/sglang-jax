@@ -85,6 +85,7 @@ the model cookbook is maintained as a Mintlify-style recipe collection.
    developer_guide/index
    developer_guide/contribution_guide
    developer_guide/benchmark_and_profiling
+   developer_guide/deepseek_v4_flash_experiments
    developer_guide/ci_architecture
    developer_guide/jax_tutorial
    developer_guide/release_process

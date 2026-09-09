@@ -807,6 +807,12 @@ class ModelRunnerKVCacheMixin:
         dp_size: int = 1,
     ):
         """Initialize memory pool for KV cache (+ recurrent state if hybrid)."""
+        if getattr(self.model_config.hf_config, "model_type", None) == "deepseek_v4":
+            from sgl_jax.srt.mem_cache.deepseek_v4_paged_pool import init_v4_paged_pools
+
+            init_v4_paged_pools(self)
+            return
+
         # 1. kv_cache_dtype
         self._init_kv_cache_dtype()
 
