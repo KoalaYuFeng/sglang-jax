@@ -1,4 +1,4 @@
-"""Fixed GSM8K-128 Non-Think deployment check, not a full-test baseline.
+"""Frozen GSM8K Non-Think evaluation: full test or legacy 128-row smoke test.
 
 Keep dataset, prompts and responses in a private output directory. No tools,
 calculator, score-dependent retry, runtime changes or server restart are used.
@@ -58,10 +58,10 @@ def score(case, response):
     }
 
 
-def select_indices(size):
+def select_indices(size, full_test=False):
     if size != 1319:
         raise ValueError("Expected the complete original 1319-row test split")
-    return sorted(random.Random(SEED).sample(range(size), TOTAL))
+    return list(range(size)) if full_test else sorted(random.Random(SEED).sample(range(size), TOTAL))
 
 
 def prepare(args):
@@ -74,7 +74,7 @@ def prepare(args):
     source = json.loads((out / "dataset-source.json").read_text())
     assert sha(out / "test.jsonl") == source["sha256"]
     rows = read_jsonl(out / "test.jsonl")
-    indices = select_indices(len(rows))
+    indices = select_indices(len(rows), args.full_test)
     for name, digest in reference["tokenizer_sha256"].items():
         assert sha(args.tokenizer / name) == digest
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer, local_files_only=True)
@@ -117,10 +117,10 @@ def prepare(args):
     protocol = {
         "dataset": "GSM8K original test",
         "dataset_source": source,
-        "total": TOTAL,
+        "total": len(indices),
         "full_test_size": 1319,
-        "subset": True,
-        "subset_seed": SEED,
+        "subset": not args.full_test,
+        "subset_seed": None if args.full_test else SEED,
         "source_indices": indices,
         "shots": 0,
         "samples_per_question": 1,
@@ -142,7 +142,7 @@ def prepare(args):
         ),
         "cases_sha256": sha(out / "cases.jsonl"),
         "official_protocol_equivalence_established": False,
-        "limitation": "Small fixed subset and custom zero-shot greedy prompt; not comparable to a full official Instruct or Base result.",
+        "limitation": "Custom zero-shot greedy protocol, not a matched official Instruct or Base protocol. Coverage is recorded separately by subset/total.",
     }
     save(out / "protocol.json", protocol)
     (out / "results").mkdir()
@@ -150,7 +150,7 @@ def prepare(args):
     print(
         json.dumps(
             {
-                "prepared": TOTAL,
+                "prepared": len(indices),
                 "prompt_min": min(c["prompt_tokens"] for c in cases),
                 "prompt_max": max(c["prompt_tokens"] for c in cases),
                 "protocol_sha256": sha(out / "protocol.json"),
@@ -168,10 +168,11 @@ def load_protocol(out):
     )
     assert protocol["cases_sha256"] == sha(out / "cases.jsonl")
     cases = read_jsonl(out / "cases.jsonl")
-    assert len(cases) == protocol["total"] == TOTAL
+    full_test = not protocol["subset"]
+    assert len(cases) == protocol["total"] == (1319 if full_test else TOTAL)
     assert (
         [c["source_index"] for c in cases]
-        == select_indices(1319)
+        == select_indices(1319, full_test)
         == protocol["source_indices"]
     )
     return protocol, cases
@@ -197,8 +198,8 @@ def audit(out):
         manifest[str(path.relative_to(out))] = sha(path)
     report = {
         "complete": True,
-        "total": TOTAL,
-        "subset": True,
+        "total": protocol["total"],
+        "subset": protocol["subset"],
         "full_test_size": 1319,
         "protocol_sha256": sha(out / "protocol.json"),
         "official_protocol_equivalence_established": False,
@@ -212,7 +213,7 @@ def audit(out):
         "conflicting_final_numbers",
     ):
         report[key] = sum(r.get(key, False) for r in records)
-    report["accuracy_percent"] = report["correct"] / TOTAL * 100
+    report["accuracy_percent"] = report["correct"] / protocol["total"] * 100
     save(out / "audit-manifest.json", manifest)
     save(out / "audit.json", report)
     print(json.dumps(report), flush=True)
@@ -249,7 +250,7 @@ def run(args):
         value = dict(
             state=state,
             complete=state == "complete",
-            total=TOTAL,
+            total=protocol["total"],
             completed=len(records),
             pid=os.getpid(),
             run_id=run_id,
@@ -286,12 +287,12 @@ def run(args):
             errors = 0
             status("running")
             for case in cases:
-                assert time.monotonic() - start < 3600, "One-hour client lease expired"
+                assert time.monotonic() - start < 14400, "Four-hour client lease expired"
                 assert fingerprint() == protocol["source_fingerprint"]
                 i = case["index"]
                 if i % 32 == 0:
                     check_server()
-                rid = f"v4-gsm8k128-{run_id}-{i}"
+                rid = f"v4-gsm8k-{protocol['total']}-{run_id}-{i}"
                 save(
                     out / "attempts" / f"{i:03d}.json",
                     {
@@ -363,6 +364,7 @@ if __name__ == "__main__":
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--reference-protocol", type=Path)
     parser.add_argument("--tokenizer", type=Path)
+    parser.add_argument("--full-test", action="store_true", help="Prepare all 1319 original test questions")
     parser.add_argument("--server-receipt", type=Path)
     parser.add_argument("--base-url", default="http://127.0.0.1:30126")
     args = parser.parse_args()

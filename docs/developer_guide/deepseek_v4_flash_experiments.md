@@ -1,11 +1,20 @@
 # DeepSeek-V4-Flash: integration snapshot and experiment ledger
 
-Updated on 2026-09-11 (Singapore). This is the entry point for this branch's V4 deployment source,
+Updated on 2026-09-12 (Singapore). This is the entry point for this branch's V4 deployment source,
 experiment settings and results. The historical reports linked below retain
 their original stage, source identity, failures and acceptance scope; their
 older uses of "current" do not supersede this ledger.
 
 ## Latest numerical and task-accuracy baseline — 2026-09-11
+
+The [full benchmark report](deepseek_v4_full_benchmarks_20260911.md), completed
+on September 12, is the current task-accuracy summary: **GPQA Diamond 143/198
+(72.22%)**, **GSM8K 1,280/1,319 (97.04%)**, **HumanEval 149/164 (90.85% greedy
+pass@1)**. Every named test split is complete. GSM8K took 77.47 minutes and
+HumanEval 19.37 minutes; no new inference failures or truncations. Format-invalid
+outputs remain wrong (one GSM8K, five HumanEval); no parser changes or retries.
+The serving runtime is unchanged. The earlier GSM8K-128 result below is a
+historical smoke test, not the formal benchmark score.
 
 See the [v5p release/evaluation report](deepseek_v4_v5p_release_20260911.md)
 for the published EP reduction, RoPE and CSA index-pooling fixes, full

@@ -5,6 +5,12 @@ official-runtime numerical equivalence or production/SLA acceptance.
 Branch: `integration/deepseek-v4`, built on `270dfcbd`. The commit containing
 this report publishes the previously uncommitted numerical fixes and evidence.
 
+**Follow-up completed September 12:** the [full benchmark report](deepseek_v4_full_benchmarks_20260911.md)
+records **GSM8K 1,280/1,319 (97.04%)** and **HumanEval 149/164 (90.85% greedy
+pass@1)** on the same runtime, alongside the existing full GPQA Diamond result.
+It supersedes the GSM8K-128 smoke test below as the formal GSM8K measurement;
+this release's historical subset results and performance provenance remain intact.
+
 ## Exact runtime setting
 
 - Official **Instruct** checkpoint `deepseek-ai/DeepSeek-V4-Flash`, revision
