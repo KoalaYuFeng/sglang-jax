@@ -9,6 +9,7 @@ local outputs combine in ascending expert order, as in the retained baseline.
 import jax
 import jax.numpy as jnp
 
+from sgl_jax.srt.kernels.deepseek_v4.collectives import ordered_ep_sum
 from sgl_jax.srt.kernels.gmm.routing import expert_permutation
 from sgl_jax.srt.kernels.low_bit.gmm import grouped_fp4_matmul
 
@@ -109,4 +110,4 @@ def gmm_fp4_experts(
     local = jnp.zeros(x.shape, jnp.float32)
     for choice in range(top_k):
         local = local + ordered[:, choice]
-    return jax.lax.psum(local, axis_name)
+    return ordered_ep_sum(local, axis_name)

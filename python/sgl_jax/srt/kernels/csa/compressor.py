@@ -12,6 +12,7 @@ from jax.experimental.pallas import tpu as pltpu
 
 from sgl_jax.srt.kernels.low_bit.formats import round_bf16
 
+from .numerics import index_pool_v4
 from .tune import (
     CSA_ATTENTION_DIM,
     CSA_CACHE_PACKING,
@@ -311,7 +312,13 @@ def _pool_uniform_groups(
             )
         window_kv = jnp.concatenate((previous_kv, kv[:, :, head_dim:]), axis=1)
         window_score = jnp.concatenate((previous_score, score[:, :, head_dim:]), axis=1)
-    pooled = jnp.sum(window_kv * jax.nn.softmax(window_score, axis=1), axis=1)
+    if numerical_mode == "v4" and head_dim == CSA_INDEX_DIM:
+        # FP4 index keys amplify small pooling errors at BF16 midpoints.
+        # Keep this correction inside the original emitter; state ownership,
+        # main KV compression, and legacy numerical modes are unchanged.
+        pooled = index_pool_v4(window_kv, window_score)
+    else:
+        pooled = jnp.sum(window_kv * jax.nn.softmax(window_score, axis=1), axis=1)
     norm = norm_ref[...].reshape(1, head_dim).astype(jnp.float32)
     if numerical_mode == "v4":
         pooled = round_bf16(pooled).astype(jnp.float32)

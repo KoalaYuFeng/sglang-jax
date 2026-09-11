@@ -9,6 +9,7 @@ import functools
 import jax
 import jax.numpy as jnp
 
+from sgl_jax.srt.kernels.deepseek_v4.collectives import ordered_ep_sum
 from sgl_jax.srt.kernels.deepseek_v4.dense import DenseKernels
 from sgl_jax.srt.kernels.low_bit.matmul import low_bit_matmul
 
@@ -91,7 +92,7 @@ def grouped_fp4_experts(
         return jax.lax.fori_loop(0, (count + 7) // 8, tile, total)
 
     local = jax.lax.fori_loop(0, local_experts, accumulate, jnp.zeros(x.shape, jnp.float32))
-    return jax.lax.psum(local, axis_name)
+    return ordered_ep_sum(local, axis_name)
 
 
 def moe(x, token_ids, weights, config, metadata, *, backend="legacy", dense_kernels=DenseKernels()):

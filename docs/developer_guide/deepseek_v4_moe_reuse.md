@@ -35,9 +35,12 @@ not yet tune K tiling or implement the fused-MoE v2 cross-device pipeline.
 2. Gate clipping precedes SiLU; the up branch is clipped symmetrically.
 3. Routing weights multiply the intermediate activation before W2's FP8 QAT.
 4. Duplicate expert choices coalesce before that quantization, as in legacy.
-5. Local expert outputs sum in ascending expert order, then use the existing
-   expert-parallel FP32 collective. Inactive routes belong to a sentinel group
-   outside all device-owned expert ranges, including entirely idle chips.
+5. Local expert outputs sum in ascending expert order, then use V4's
+   deterministic ascending-rank FP32 reduction. See the later
+   [EP reduction acceptance](deepseek_v4_ep_reduction_correctness.md) for
+   the B16/B32 defect, retained old baseline and new independent-reference gates.
+   Inactive routes belong to a sentinel group outside all device-owned expert
+   ranges, including entirely idle chips.
 
 ## Rollout gates
 

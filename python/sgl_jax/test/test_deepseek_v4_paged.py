@@ -110,8 +110,25 @@ def test_metadata_lengths_are_dynamic_and_pages_are_physical():
     np.testing.assert_array_equal(b.req_slots, [4, 2])
 
 
+@pytest.fixture
+def official_rope_reference(monkeypatch):
+    """Align only reference coefficients; retain all bitwise paging assertions.
+
+    The native RoPE fix uses host FP32 coefficients, whereas the frozen bring-up
+    reference still traces pow into XLA. An isolated legacy-phase control made
+    all eight affected CPU cases pass. Use independently constructed official
+    PyTorch coefficients here, not the native implementation as its own oracle.
+    This patch is scoped to one test; the historical runtime reference is intact.
+    """
+    pytest.importorskip("torch")
+    from sgl_jax.srt.model_executor import deepseek_v4_reference
+    from sgl_jax.test.deepseek_v4_reference_rope import official_recipe_rope
+
+    monkeypatch.setattr(deepseek_v4_reference, "rope", official_recipe_rope)
+
+
 @pytest.mark.parametrize("ratio,index", [(4, False), (4, True), (128, False)])
-def test_ragged_compressor_matches_reference_and_reuses_prefix(ratio, index):
+def test_ragged_compressor_matches_reference_and_reuses_prefix(ratio, index, official_rope_reference):
     rng = np.random.default_rng(20260907)
     config = V4LayerConfig(hidden=128, head_dim=128, index_dim=128, max_context=384, ratio=ratio)
     weights = _compressor_weights(rng, config, index=index)
@@ -451,7 +468,8 @@ def test_index_score_jit_cannot_elide_official_bf16_rounding():
     np.testing.assert_array_equal(np.asarray(trace["index_selected"])[0], np.arange(8))
 
 
-def test_8k_page_index_topk_and_compressor_boundary():
+@pytest.mark.parametrize("context", [8192, 8320])
+def test_8k_page_index_topk_and_compressor_boundary(context, official_rope_reference):
     """8K address space with >512 candidates and two independent terminal pages."""
     from sgl_jax.srt.kernels.deepseek_v4.attention import attention
     from sgl_jax.srt.model_executor.deepseek_v4_reference import attention as reference_attention
@@ -465,15 +483,16 @@ def test_8k_page_index_topk_and_compressor_boundary():
         index_heads=2,
         index_dim=128,
         index_topk=512,
-        max_context=8192,
+        max_context=context,
         ratio=4,
     )
     rng = np.random.default_rng(8192)
     weights = attention_weights(config)
-    pages = [list(range(1, 129, 2)), list(range(2, 129, 2))]
-    batch = make_batch([8191, 8063], [1, 1], pages=pages, decode=True)
-    metadata = V4PagedBackend(max_context=8192, capacity=16384).get_forward_metadata(batch)
-    cache = make_cache(config, capacity=16384)
+    page_count = context // 128
+    pages = [list(range(1, 2 * page_count + 1, 2)), list(range(2, 2 * page_count + 1, 2))]
+    batch = make_batch([context - 1, context - 129], [1, 1], pages=pages, decode=True)
+    metadata = V4PagedBackend(max_context=context, capacity=2 * context).get_forward_metadata(batch)
+    cache = make_cache(config, capacity=2 * context)
     references = []
     for request in range(2):
         ref = empty_cache(config)
@@ -520,7 +539,7 @@ def test_8k_page_index_topk_and_compressor_boundary():
 
 
 @pytest.mark.parametrize("ratio", [0, 4, 128])
-def test_paged_attention_matches_independent_requests_and_batched_decode(ratio):
+def test_paged_attention_matches_independent_requests_and_batched_decode(ratio, official_rope_reference):
     from sgl_jax.srt.kernels.deepseek_v4.attention import attention
     from sgl_jax.srt.model_executor.deepseek_v4_reference import attention as reference_attention
 

@@ -114,7 +114,7 @@ def test_original_csa_decode_projection_exact_across_lanes_batches_and_mixed_que
 @TPU
 @pytest.mark.parametrize("dim", [128, 512])
 @pytest.mark.parametrize("groups", [1, 4, 9, 65])
-def test_original_csa_selected_emitter_matches_retained_and_fp64(dim, groups):
+def test_original_csa_selected_emitter_matches_precision_contract_and_fp64(dim, groups):
     rng = np.random.default_rng(4)
     v, s = [jnp.asarray(rng.normal(size=(groups, 8, dim)), jnp.float32) for _ in range(2)]
     # First group has no previous overlap; padding is an independent mask.
@@ -124,23 +124,33 @@ def test_original_csa_selected_emitter_matches_retained_and_fp64(dim, groups):
     valid = jnp.ones((groups,), jnp.bool_).at[-1].set(groups == 1)
     run = jax.jit(lambda v, s, n, p, live: csa.emit(v, s, n, p, live, CONFIG))
     actual = run(v, s, norm, starts, valid)
-    expected = jax.jit(
-        lambda v, s, n, p: rope(
-            rms_norm(round_bf16(jnp.sum(v * jax.nn.softmax(s, axis=1), axis=1)), n, CONFIG.eps),
-            p,
-            CONFIG,
+    # Independent FP64 pooling, never the candidate's polynomial/helper.
+    value, score = np.asarray(v, np.float64), np.asarray(s, np.float64)
+    probability = np.exp(score - score.max(axis=1, keepdims=True))
+    probability /= probability.sum(axis=1, keepdims=True)
+    pooled = np.sum(value * probability, axis=1).astype(ml_dtypes.bfloat16).astype(np.float64)
+    if dim == 128:
+        # Index pooling deliberately corrects the old exp/softmax approximation.
+        # Keep a bitwise gate, but against independently rounded FP64 pooling,
+        # not the obsolete implementation's rounding error. The independent
+        # official-Python matrix is separate and retains its original limits.
+        expected = jax.jit(lambda v, n, p: rope(rms_norm(v, n, CONFIG.eps), p, CONFIG))(
+            jnp.asarray(pooled, jnp.bfloat16), norm, starts
         )
-    )(v, s, norm, starts)
+    else:
+        expected = jax.jit(
+            lambda v, s, n, p: rope(
+                rms_norm(round_bf16(jnp.sum(v * jax.nn.softmax(s, axis=1), axis=1)), n, CONFIG.eps),
+                p,
+                CONFIG,
+            )
+        )(v, s, norm, starts)
     live = np.asarray(valid)
     np.testing.assert_array_equal(
         np.asarray(actual)[live].view(np.uint16), np.asarray(expected)[live].view(np.uint16)
     )
     np.testing.assert_array_equal(np.asarray(actual)[~live], 0)
     # Independent FP64 pooling/RMS/RoPE with identical FP32 input tables.
-    value, score = np.asarray(v, np.float64), np.asarray(s, np.float64)
-    probability = np.exp(score - score.max(axis=1, keepdims=True))
-    probability /= probability.sum(axis=1, keepdims=True)
-    pooled = np.sum(value * probability, axis=1).astype(ml_dtypes.bfloat16).astype(np.float64)
     normalized = (
         (
             pooled
@@ -245,10 +255,10 @@ def test_csa_raw_window_integration_trace_views_are_not_kernel_intermediates(ind
 
 @TPU
 @pytest.mark.parametrize("ties", [False, True])
-@pytest.mark.parametrize("case", ["short", "8k", "decode_inert"])
+@pytest.mark.parametrize("case", ["short", "8k", "decode_inert", "8320"])
 def test_original_csa_indexer_scores_topk_and_dynamic_ragged_pages(case, ties):
     rng = np.random.default_rng(8023)
-    context = 384 if case == "short" else 8192
+    context = 384 if case == "short" else (8320 if case == "8320" else 8192)
     cfg = replace(CONFIG, max_context=context)
     pages = rng.permutation(np.arange(1, 1 + 3 * (context // 128))).reshape(3, -1).tolist()
     prefixes, counts = (
@@ -256,6 +266,8 @@ def test_original_csa_indexer_scores_topk_and_dynamic_ragged_pages(case, ties):
     )
     if case == "decode_inert":
         prefixes, counts = [8023, 0, 8191], [1, 0, 1]
+    if case == "8320":
+        prefixes, counts = [8190, 8218, 8318], [4, 6, 2]
     batch = make_batch(
         prefixes, counts, pages=pages, padding=3, decode=case == "decode_inert", slots=[3, 1, 0]
     )

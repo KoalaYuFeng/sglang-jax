@@ -212,14 +212,19 @@ def test_original_emitter_matches_retained_pool_norm_rope(entries):
         ([127, 254], [1, 1]),
         ([121, 250], [8, 9]),
         ([8023, 8191], [1, 1]),
+        ([8191, 8192], [1, 1]),
+        ([8223, 8319], [1, 1]),
     ],
 )
 def test_original_attention_noncontiguous_token_pages(prefixes, counts):
     rng = np.random.default_rng(8023)
-    context = 8192 if max(prefixes) > 384 else 384
+    context = max(384, (max(p + n for p, n in zip(prefixes, counts)) + 127) // 128 * 128)
     config = replace(CONFIG, max_context=context)
-    pages = None if context == 384 else rng.permutation(np.arange(1, 129)).reshape(2, 64).tolist()
-    capacity = 12 if pages is None else 129
+    pages = (
+        None if context == 384
+        else rng.permutation(np.arange(1, 1 + 2 * (context // 128))).reshape(2, -1).tolist()
+    )
+    capacity = 12 if pages is None else 1 + 2 * (context // 128)
     batch = make_batch(prefixes, counts, pages=pages, padding=3)
     meta = V4PagedBackend(max_context=context).get_forward_metadata(batch)
     positions = jnp.asarray(batch.positions)

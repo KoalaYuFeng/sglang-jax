@@ -10,6 +10,7 @@ from dataclasses import dataclass
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from sgl_jax.srt.kernels.low_bit.formats import round_bf16
 from sgl_jax.srt.kernels.low_bit.matmul import low_bit_matmul
@@ -65,23 +66,61 @@ def rms_norm(x, weight, eps):
     return round_bf16(normalized * weight.astype(jnp.float32))
 
 
-def rope_angles(positions, config):
-    """FP32 checkpoint RoPE phase, shared by XLA and original-HCA adapters."""
-    rd = config.rope_dim
-    frequency = 1.0 / (config.rope_base ** (jnp.arange(0, rd, 2, dtype=jnp.float32) / rd))
-    if config.original_seq_len:
+@functools.lru_cache(maxsize=32)
+def _rope_frequencies(rd, base, original_seq_len, factor, beta_fast, beta_slow):
+    """Host FP32 coefficients with the checkpoint's explicit rounding order.
+
+    Do not trace power/YaRN construction into the TPU program. Its angle
+    differences can cross BF16/FP4 rounding boundaries (the CSA-index
+    position-219 regression). Only the
+    small, immutable frequency vector is cached, independent of layer, batch,
+    and context length; execution still multiplies dynamic positions on device.
+    No PyTorch dependency or host callback is introduced.
+    """
+    if rd <= 0 or rd % 2:
+        raise ValueError("RoPE dimension must be positive and even")
+    if base <= 1 or factor <= 0 or beta_fast <= 0 or beta_slow <= 0:
+        raise ValueError("invalid RoPE base/scaling parameters")
+    exponent = np.arange(0, rd, 2, dtype=np.float32) / np.float32(rd)
+    # Scalar libm followed by FP32 rounding avoids SIMD pow implementation
+    # differences. The reciprocal and all YaRN operations round in FP32.
+    powers = np.asarray([math.pow(base, float(x)) for x in exponent], dtype=np.float32)
+    frequency = np.float32(1) / powers
+    if original_seq_len > 0:
 
         def correction(rotations):
             return (
-                rd
-                * math.log(config.original_seq_len / (rotations * 2 * math.pi))
-                / (2 * math.log(config.rope_base))
+                rd * math.log(original_seq_len / (rotations * 2 * math.pi)) / (2 * math.log(base))
             )
 
-        low = max(math.floor(correction(config.beta_fast)), 0)
-        high = min(math.ceil(correction(config.beta_slow)), rd - 1)
-        ramp = jnp.clip((jnp.arange(rd // 2) - low) / (high - low if high != low else 0.001), 0, 1)
-        frequency = frequency / config.rope_factor * ramp + frequency * (1 - ramp)
+        low = max(math.floor(correction(beta_fast)), 0)
+        high = min(math.ceil(correction(beta_slow)), rd - 1)
+        ramp = np.clip(
+            (np.arange(rd // 2, dtype=np.float32) - np.float32(low))
+            / np.float32(high - low if high != low else 0.001),
+            np.float32(0),
+            np.float32(1),
+        )
+        smooth = np.float32(1) - ramp
+        # Preserve both subtractions from the official FP32 recipe. Replacing
+        # 1 - smooth with ramp is algebraically, but not numerically, equivalent.
+        frequency = frequency / np.float32(factor) * (np.float32(1) - smooth) + frequency * smooth
+    frequency.flags.writeable = False
+    return frequency
+
+
+def rope_angles(positions, config):
+    """Shared V4 phase: immutable host frequencies × dynamic FP32 positions."""
+    frequency = jnp.asarray(
+        _rope_frequencies(
+            config.rope_dim,
+            config.rope_base,
+            config.original_seq_len,
+            config.rope_factor,
+            config.beta_fast,
+            config.beta_slow,
+        )
+    )
     return positions.astype(jnp.float32)[:, None] * frequency[None, :]
 
 

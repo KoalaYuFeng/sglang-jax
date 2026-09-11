@@ -1,12 +1,21 @@
 # DeepSeek-V4-Flash: integration snapshot and experiment ledger
 
-Published on 2026-09-10 (Singapore); the latest measurements are dated
-2026-09-09 UTC. This is the entry point for this branch's V4 deployment source,
+Updated on 2026-09-11 (Singapore). This is the entry point for this branch's V4 deployment source,
 experiment settings and results. The historical reports linked below retain
 their original stage, source identity, failures and acceptance scope; their
 older uses of "current" do not supersede this ledger.
 
-## Current accepted scope
+## Latest numerical and task-accuracy baseline — 2026-09-11
+
+See the [v5p release/evaluation report](deepseek_v4_v5p_release_20260911.md)
+for the published EP reduction, RoPE and CSA index-pooling fixes, full
+GPQA Diamond **143/198 (72.22%)**, fixed GSM8K-128 **123/128 (96.09%)**,
+and the current-source short HTTP performance check. It distinguishes the
+older 4K/8K ModelWorker matrix from the latest runtime and retains numerical
+limitations and failed-before-fix test receipts. This is not full production
+or official-runtime equivalence certification.
+
+## Historical accepted scope — 2026-09-10
 
 The full 43-layer model runs through SGLang-JAX ModelWorker with paged state,
 chunked prefill, KV updates and the output head in the whole-model compiled
