@@ -5,6 +5,21 @@ experiment settings and results. The historical reports linked below retain
 their original stage, source identity, failures and acceptance scope; their
 older uses of "current" do not supersede this ledger.
 
+## Published result index
+
+| Record | Status / scope |
+| --- | --- |
+| [Full accuracy and official Instruct comparison](deepseek_v4_full_benchmarks_20260911.md) | GPQA Diamond 72.22%, GSM8K 97.04%, HumanEval 90.85%; all named test splits complete |
+| [Same-runtime HTTP performance](deepseek_v4_v5p_release_20260911.md#performance-provenance) | 128/1024 input tokens, 32 output tokens, concurrency 1/4; measured finite batches, not sustained stress |
+| [Historical 4K/8K performance and HBM](deepseek_v4_8320_validation_profile.md) | Older ModelWorker runtime; not current-source HTTP performance |
+| [Cancelled MMLU-Pro](deepseek_v4_mmlu_full_20260911.md) | Incomplete; no full-test score. LiveCodeBench has not been run |
+
+September 12 cleanup is limited to evaluation-code formatting and documentation.
+The measured evaluator snapshot remains commit `7c0c671`; frozen evidence hashes
+must be checked against that snapshot, not reformatted files. Runtime kernels,
+weight handling and core scheduling are unchanged. No new long benchmark is
+scheduled as part of publication.
+
 ## Latest numerical and task-accuracy baseline — 2026-09-11
 
 The [full benchmark report](deepseek_v4_full_benchmarks_20260911.md), completed

@@ -7,8 +7,8 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "scripts"))
-from evaluate_deepseek_v4_gsm8k import extract, normalize, score, select_indices
 import evaluate_deepseek_v4_gsm8k as evaluator
+from evaluate_deepseek_v4_gsm8k import extract, normalize, score, select_indices
 
 
 @pytest.mark.parametrize(
@@ -92,13 +92,20 @@ def test_full_audit_denominator_and_four_digit_record_names(tmp_path, monkeypatc
     protocol = {"total": 1319, "subset": False, "source_fingerprint": "synthetic"}
     (tmp_path / "protocol.json").write_text(json.dumps(protocol))
     (tmp_path / "results").mkdir()
-    cases = [{"index": i, "source_index": i, "gold": "42", "prompt_tokens": 1,
-              "max_new_tokens": 2048} for i in range(1319)]
+    cases = [
+        {"index": i, "source_index": i, "gold": "42", "prompt_tokens": 1, "max_new_tokens": 2048}
+        for i in range(1319)
+    ]
     monkeypatch.setattr(evaluator, "load_protocol", lambda out: (protocol, cases))
     for case in cases:
         record = {k: case[k] for k in ("index", "source_index", "gold")}
-        record.update(protocol_sha256=evaluator.sha(tmp_path / "protocol.json"),
-                      failed=True, correct=False, invalid=True, truncated=False)
+        record.update(
+            protocol_sha256=evaluator.sha(tmp_path / "protocol.json"),
+            failed=True,
+            correct=False,
+            invalid=True,
+            truncated=False,
+        )
         (tmp_path / "results" / f"{case['index']:03d}.json").write_text(json.dumps(record))
     evaluator.audit(tmp_path)
     result = json.loads((tmp_path / "audit.json").read_text())

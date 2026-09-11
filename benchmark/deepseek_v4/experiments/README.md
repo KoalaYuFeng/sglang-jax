@@ -2,6 +2,14 @@
 
 Start with the [experiment ledger](../../../docs/developer_guide/deepseek_v4_flash_experiments.md).
 
+Latest published deployment results:
+
+- [Full GPQA Diamond, GSM8K and HumanEval accuracy](../../../docs/developer_guide/deepseek_v4_full_benchmarks_20260911.md),
+  including official Instruct comparison, frozen evaluator revision and limitations.
+- [Same-runtime HTTP performance and settings](../../../docs/developer_guide/deepseek_v4_v5p_release_20260911.md#performance-provenance).
+  Historical ModelWorker timings below are separate experiments, not substitutes
+  for current-source HTTP measurements.
+
 | Record | Comparison | Acceptance scope |
 | --- | --- | --- |
 | [20260909-v5p4-fp4-model-ab.json](20260909-v5p4-fp4-model-ab.json) | Existing `gmm` versus opt-in `gmm_tuned`; all other execution options fixed | Full 43-layer, 8K-tail ModelWorker; 3832 paired bitwise output rows; ten audited device captures |

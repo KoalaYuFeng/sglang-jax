@@ -61,7 +61,9 @@ def score(case, response):
 def select_indices(size, full_test=False):
     if size != 1319:
         raise ValueError("Expected the complete original 1319-row test split")
-    return list(range(size)) if full_test else sorted(random.Random(SEED).sample(range(size), TOTAL))
+    return (
+        list(range(size)) if full_test else sorted(random.Random(SEED).sample(range(size), TOTAL))
+    )
 
 
 def prepare(args):
@@ -80,9 +82,7 @@ def prepare(args):
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer, local_files_only=True)
     encoder_path = Path(reference["checkpoint"]) / "encoding/encoding_dsv4.py"
     assert sha(encoder_path) == reference["encoder_sha256"]
-    spec = importlib.util.spec_from_file_location(
-        "gsm8k_official_encoder", encoder_path
-    )
+    spec = importlib.util.spec_from_file_location("gsm8k_official_encoder", encoder_path)
     encoder = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(encoder)
     cases = []
@@ -137,9 +137,7 @@ def prepare(args):
         "encoder_sha256": reference["encoder_sha256"],
         "source_fingerprint": fingerprint(),
         "script_sha256": sha(__file__),
-        "helper_sha256": sha(
-            Path(__file__).with_name("evaluate_deepseek_v4_mmlu_full.py")
-        ),
+        "helper_sha256": sha(Path(__file__).with_name("evaluate_deepseek_v4_mmlu_full.py")),
         "cases_sha256": sha(out / "cases.jsonl"),
         "official_protocol_equivalence_established": False,
         "limitation": "Custom zero-shot greedy protocol, not a matched official Instruct or Base protocol. Coverage is recorded separately by subset/total.",
@@ -189,9 +187,7 @@ def audit(out):
         assert record["gold"] == case["gold"]
         assert record["protocol_sha256"] == sha(out / "protocol.json")
         if "response" in record:
-            assert all(
-                record[k] == v for k, v in score(case, record["response"]).items()
-            )
+            assert all(record[k] == v for k, v in score(case, record["response"]).items())
         else:
             assert record["failed"] and not record["correct"]
         records.append(record)
@@ -231,14 +227,10 @@ def run(args):
     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     protocol, cases = load_protocol(out)
     receipt = json.loads(args.server_receipt.read_text())
-    actual = (
-        Path(f"/proc/{receipt['pid']}/cmdline").read_bytes().rstrip(b"\0").split(b"\0")
-    )
+    actual = Path(f"/proc/{receipt['pid']}/cmdline").read_bytes().rstrip(b"\0").split(b"\0")
     assert [v.decode() for v in actual] == receipt["command"]
     assert (
-        fingerprint()
-        == protocol["source_fingerprint"]
-        == receipt["framework_source_fingerprint"]
+        fingerprint() == protocol["source_fingerprint"] == receipt["framework_source_fingerprint"]
     )
     save(out / "server-start.json", receipt)
     # Fresh run only. A failed/interrupted experiment must not silently resample.
@@ -268,15 +260,10 @@ def run(args):
         with httpx.Client(base_url=args.base_url, timeout=600) as client:
 
             def check_server():
-                info = (
-                    client.get("/get_server_info", timeout=20).raise_for_status().json()
-                )
-                assert info["status"] == "ready" and validate_idle(
-                    info["internal_states"], 33280
-                )
+                info = client.get("/get_server_info", timeout=20).raise_for_status().json()
+                assert info["status"] == "ready" and validate_idle(info["internal_states"], 33280)
                 assert (
-                    info["model_path"] == protocol["checkpoint"]
-                    and info["context_length"] == 8192
+                    info["model_path"] == protocol["checkpoint"] and info["context_length"] == 8192
                 )
                 assert (info["tp_size"], info["ep_size"], info["dp_size"]) == (4, 4, 1)
                 assert info["chunked_prefill_size"] == 128
@@ -364,7 +351,9 @@ if __name__ == "__main__":
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--reference-protocol", type=Path)
     parser.add_argument("--tokenizer", type=Path)
-    parser.add_argument("--full-test", action="store_true", help="Prepare all 1319 original test questions")
+    parser.add_argument(
+        "--full-test", action="store_true", help="Prepare all 1319 original test questions"
+    )
     parser.add_argument("--server-receipt", type=Path)
     parser.add_argument("--base-url", default="http://127.0.0.1:30126")
     args = parser.parse_args()

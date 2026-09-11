@@ -17,6 +17,30 @@ rerun. Every row covers its entire named test split, not a random sample.
 | GSM8K | 1,319 | Zero-shot Non-Think, greedy, no tools | 1,280/1,319 | 97.04% | 77.47 min |
 | HumanEval | 164 | Zero-shot Non-Think, greedy pass@1, original tests | 149/164 | 90.85% | 19.37 min |
 
+## Official Instruct comparison
+
+The [DeepSeek release's Instruct mode table](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash/commit/a7aaed80dd2df27620eb534454253ea25eb11c7a)
+is the reference below, checked September 12. Compare our Non-Think runs with
+**Flash Non-Think**, not Base, Pro, Think High or Think Max.
+
+| Benchmark | Official Flash Instruct Non-Think | This v5p deployment | Interpretation |
+| --- | ---: | ---: | --- |
+| GPQA Diamond | 71.2% | 72.22% (143/198) | Similar aggregate accuracy; prompt/repetition protocol not fully matched |
+| GSM8K | No corresponding score found in the official Instruct table | 97.04% (1280/1319) | Full-test deployment baseline, not a reproduced vendor score |
+| HumanEval | No corresponding score found in the official Instruct table | 90.85% (149/164) | Full-test deployment baseline, not a reproduced vendor score |
+
+The GPQA difference is **+1.02 percentage points**, not evidence of superiority
+or sample-by-sample runtime equivalence. The official 90.8% GSM8K (8-shot) and
+69.5% HumanEval figures belong to **Flash-Base** and are not valid Instruct
+baselines. Benchmark coverage and matching the vendor's evaluation protocol
+are separate requirements.
+
+No additional long benchmark is being launched: MMLU-Pro remains cancelled
+and incomplete; LiveCodeBench has not been run. Neither has a full-test score
+for this deployment.
+
+## Run settings and result details
+
 GSM8K: **4,648.04 seconds**, zero request failures, zero truncations, one
 invalid final-answer format (counted wrong), zero conflicting final numbers.
 HumanEval: **1,162.35 seconds**, zero request/infrastructure failures, zero
@@ -136,6 +160,21 @@ Both score-report and all-result manifest hashes match the remote evidence.
 
 ## Evidence and reproduction
 
+The measured evaluator code is published at **`7c0c67105136236ca3c0026ce3fe654dd50dd745`**.
+The September 12 publication cleanup only reformats the GSM8K/HumanEval
+evaluators and their synthetic tests; it does not change prompts, sampling,
+answer extraction, scoring, sandbox policy, or model execution. File hashes
+nevertheless change. To audit the existing frozen evidence, use the evaluator
+files from that commit or the archived snapshot. Do not rewrite old protocol
+hashes or bypass their checks to accommodate newer files; prepare a new
+protocol for any future run with changed files.
+
+Cleanup verification: the two evaluator scripts have identical Python ASTs
+before/after formatting. The local CPU-only GSM8K, HumanEval, GPQA, MMLU-full
+protocol and release-benchmark audit suites report **70 passed**. Black, isort,
+Ruff and `git diff --check` pass for the cleanup scope. These are synthetic
+protocol/metric checks, not new model accuracy or TPU execution tests.
+
 Local mirrors are under ignored `GCP_login/results/`; each response is saved
 atomically to the independent model disk and backed up incrementally. Raw
 questions, solutions, responses and access credentials are not published.
@@ -158,3 +197,17 @@ acceptance gaps and performance limitations remain as recorded in the release
 report; benchmark accuracy does not erase those limitations.
 Do not compare these **Instruct** measurements directly to the earlier **Base**
 GSM8K 90.8 / HumanEval 69.5 figures, or claim exact vendor-protocol equivalence.
+
+## Performance reference
+
+Use the [same-runtime HTTP measurements and exact settings](deepseek_v4_v5p_release_20260911.md#performance-provenance)
+for performance alongside these accuracy results. That report retains the
+128/1024-token input, 32-token output, concurrency 1/4 measurements and defines
+the timing boundaries. Its output tokens/s includes prefill and whole-batch
+wall time; it is not isolated decode throughput.
+
+The [historical 4K/8K ModelWorker matrix](deepseek_v4_8320_validation_profile.md)
+uses an older numerical runtime and a different measurement path. It remains
+available for historical comparison, not as a new performance measurement of
+this accuracy-validated baseline. This publication cleanup reruns neither
+TPU performance nor model accuracy and changes no scheduler or kernel code.

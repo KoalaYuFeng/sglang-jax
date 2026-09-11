@@ -40,9 +40,7 @@ def extract_code(text, entry_point):
     else:
         code = text.strip() + "\n"
     tree = ast.parse(code)
-    if not any(
-        isinstance(n, ast.FunctionDef) and n.name == entry_point for n in tree.body
-    ):
+    if not any(isinstance(n, ast.FunctionDef) and n.name == entry_point for n in tree.body):
         raise ValueError("Missing entry-point function")
     # Original prompt is a valid module ending in a docstring-only function.
     # A full generated definition replaces it; preserve imports/helpers verbatim.
@@ -106,9 +104,7 @@ def sandbox(out, payload, timeout=20):
     name = "v4-humaneval-" + uuid.uuid4().hex
     try:
         value = subprocess.run(
-            docker_command(
-                out, name, json.loads((out / "protocol.json").read_text())["image"]
-            ),
+            docker_command(out, name, json.loads((out / "protocol.json").read_text())["image"]),
             input=json.dumps(payload),
             text=True,
             capture_output=True,
@@ -166,9 +162,7 @@ def prepare(args):
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer, local_files_only=True)
     encoder_path = Path(reference["checkpoint"]) / "encoding/encoding_dsv4.py"
     assert sha(encoder_path) == reference["encoder_sha256"]
-    spec = importlib.util.spec_from_file_location(
-        "humaneval_official_encoder", encoder_path
-    )
+    spec = importlib.util.spec_from_file_location("humaneval_official_encoder", encoder_path)
     encoder = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(encoder)
     cases = []
@@ -218,9 +212,7 @@ def prepare(args):
         "encoder_sha256": reference["encoder_sha256"],
         "source_fingerprint": fingerprint(),
         "script_sha256": sha(__file__),
-        "helper_sha256": sha(
-            Path(__file__).with_name("evaluate_deepseek_v4_mmlu_full.py")
-        ),
+        "helper_sha256": sha(Path(__file__).with_name("evaluate_deepseek_v4_mmlu_full.py")),
         "sandbox_runner_sha256": sha(out / "sandbox/runner.py"),
         "cases_sha256": sha(out / "cases.jsonl"),
         "execution_timeout_seconds": 3,
@@ -247,11 +239,7 @@ def preflight(out):
     probe = sandbox(out, {"probe": True})
     canonical = sandbox(
         out,
-        {
-            "tasks": [
-                {"problem": r, "completion": r["canonical_solution"]} for r in rows
-            ]
-        },
+        {"tasks": [{"problem": r, "completion": r["canonical_solution"]} for r in rows]},
         timeout=900,
     )
     assert len(canonical) == TOTAL and all(r["passed"] for r in canonical)
@@ -287,9 +275,7 @@ def preflight(out):
         },
     )
     print(
-        json.dumps(
-            {"preflight": True, "canonical_passed": TOTAL, "negative_controls": 2}
-        ),
+        json.dumps({"preflight": True, "canonical_passed": TOTAL, "negative_controls": 2}),
         flush=True,
     )
 
@@ -316,9 +302,7 @@ def audit(out):
                 if not r["truncated"]:
                     assert r["execution"]["task_id"] == row["task_id"]
                     assert r["correct"] == r["execution"]["passed"]
-        assert not r["correct"] or not any(
-            r[k] for k in ("failed", "invalid", "truncated")
-        )
+        assert not r["correct"] or not any(r[k] for k in ("failed", "invalid", "truncated"))
         records.append(r)
         manifest[str(path.relative_to(out))] = sha(path)
     report = {
@@ -350,14 +334,10 @@ def run(args):
     pre = json.loads((out / "preflight.json").read_text())
     assert pre["complete"] and pre["protocol_sha256"] == sha(out / "protocol.json")
     receipt = json.loads(args.server_receipt.read_text())
-    command = (
-        Path(f"/proc/{receipt['pid']}/cmdline").read_bytes().rstrip(b"\0").split(b"\0")
-    )
+    command = Path(f"/proc/{receipt['pid']}/cmdline").read_bytes().rstrip(b"\0").split(b"\0")
     assert [x.decode() for x in command] == receipt["command"]
     assert (
-        fingerprint()
-        == protocol["source_fingerprint"]
-        == receipt["framework_source_fingerprint"]
+        fingerprint() == protocol["source_fingerprint"] == receipt["framework_source_fingerprint"]
     )
     assert not list((out / "attempts").glob("*.json"))
     save(out / "server-start.json", receipt)
@@ -383,15 +363,10 @@ def run(args):
         with httpx.Client(base_url="http://127.0.0.1:30126", timeout=600) as client:
 
             def check_server():
-                info = (
-                    client.get("/get_server_info", timeout=20).raise_for_status().json()
-                )
-                assert info["status"] == "ready" and validate_idle(
-                    info["internal_states"], 33280
-                )
+                info = client.get("/get_server_info", timeout=20).raise_for_status().json()
+                assert info["status"] == "ready" and validate_idle(info["internal_states"], 33280)
                 assert (
-                    info["model_path"] == protocol["checkpoint"]
-                    and info["context_length"] == 8192
+                    info["model_path"] == protocol["checkpoint"] and info["context_length"] == 8192
                 )
                 assert (info["tp_size"], info["ep_size"], info["dp_size"]) == (4, 4, 1)
                 assert info["chunked_prefill_size"] == 128
@@ -450,23 +425,15 @@ def run(args):
                     assert meta["finish_reason"]["type"] in ("stop", "length")
                     r["truncated"] = meta["finish_reason"]["type"] == "length"
                     try:
-                        r["completion"] = extract_code(
-                            response["text"], row["entry_point"]
-                        )
+                        r["completion"] = extract_code(response["text"], row["entry_point"])
                     except (SyntaxError, ValueError):
                         r["invalid"] = True
                     if not r["invalid"] and not r["truncated"]:
                         result = sandbox(
                             out,
-                            {
-                                "tasks": [
-                                    {"problem": row, "completion": r["completion"]}
-                                ]
-                            },
+                            {"tasks": [{"problem": row, "completion": r["completion"]}]},
                         )
-                        assert (
-                            len(result) == 1 and result[0]["task_id"] == row["task_id"]
-                        )
+                        assert len(result) == 1 and result[0]["task_id"] == row["task_id"]
                         r["execution"] = result[0]
                         r["correct"] = result[0]["passed"]
                     errors = 0
@@ -479,17 +446,15 @@ def run(args):
                     OSError,
                     subprocess.SubprocessError,
                 ) as error:
-                    r.update(
-                        failed=True, correct=False, error_type=type(error).__name__
-                    )
+                    r.update(failed=True, correct=False, error_type=type(error).__name__)
                     errors += 1
                 r["seconds"] = time.monotonic() - begin
                 save(out / "results" / f"{case['index']:03d}.json", r)
                 records.append(r)
                 status("running")
-                assert errors < 3, (
-                    "Three consecutive infrastructure failures; stopped without retry"
-                )
+                assert (
+                    errors < 3
+                ), "Three consecutive infrastructure failures; stopped without retry"
             save(out / "server-after.json", check_server())
         audit(out)
         status("complete")
