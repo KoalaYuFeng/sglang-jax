@@ -15,15 +15,15 @@ import jax
 import jax.experimental.pallas as pl
 import jax.numpy as jnp
 import numpy as np
-from jax.experimental.pallas import tpu as pltpu
-
 from debug_deepseek_v4_8023 import load_arrays, save_arrays
+from jax.experimental.pallas import tpu as pltpu
 from run_deepseek_v4_framework import compare_arrays, framework_fingerprint
-from sgl_jax.srt.kernels.deepseek_v4 import hca
-from sgl_jax.srt.kernels.deepseek_v4.numerics import config_for_layer
+
 from sgl_jax.srt.kernels.hca.attention import _streaming_attention
 from sgl_jax.srt.kernels.low_bit.formats import round_bf16
 from sgl_jax.srt.layers.attention.deepseek_v4_paged_backend import V4PagedBackend
+from sgl_jax.srt.layers.deepseek_v4 import hca
+from sgl_jax.srt.layers.deepseek_v4.numerics import config_for_layer
 from sgl_jax.srt.model_loader.deepseek_v4_checkpoint import DeepSeekV4Checkpoint
 from sgl_jax.test.test_deepseek_v4_paged import make_batch
 
@@ -83,18 +83,27 @@ def main():
     reference = load_arrays(args.capture / f"{stem}-reference")
     actual = load_arrays(args.capture / f"{stem}-chunk132-trace")
     cache = load_arrays(args.capture / f"{stem}-chunk132-cache")
-    differing = np.argwhere(reference["attn.attention_value"] != actual["attn.attention_value"])
+    differing = np.argwhere(
+        reference["attn.attention_value"] != actual["attn.attention_value"]
+    )
     token = int(differing[0, 0])
     print(
         json.dumps(
-            {"different_elements": len(differing), "first_indices": differing[:16].tolist()}
+            {
+                "different_elements": len(differing),
+                "first_indices": differing[:16].tolist(),
+            }
         ),
         flush=True,
     )
     batch = make_batch([token], [1], decode=True)
-    meta = jax.tree.map(jnp.asarray, V4PagedBackend(max_context=384).get_forward_metadata(batch))
+    meta = jax.tree.map(
+        jnp.asarray, V4PagedBackend(max_context=384).get_forward_metadata(batch)
+    )
     q = jnp.asarray(actual["attn.q"][token : token + 1])
-    window, compressed = jnp.asarray(cache["window"]), jnp.asarray(cache["main.compressed"])
+    window, compressed = jnp.asarray(cache["window"]), jnp.asarray(
+        cache["main.compressed"]
+    )
     ids = jnp.asarray(actual["attn.indices"][token : token + 1])
     positions = jnp.asarray([token], jnp.int32)
     sink = jnp.asarray(checkpoint.read_tensor(f"layers.{args.layer}.attn.attn_sink"))
@@ -169,7 +178,9 @@ def main():
     def run(q, w, c, ids, p, s, m):
         with (
             patch.object(pl, "pallas_call", instrument),
-            patch.object(hca, "_streaming_attention", _streaming_attention.__wrapped__),
+            patch.object(
+                hca, "streaming_attention_pallas", _streaming_attention.__wrapped__
+            ),
         ):
             value = hca.attend(q, w, c, ids, p, s, m, config)
         return value, diagnostics["stats"]
@@ -198,7 +209,9 @@ def main():
         "source_fingerprint": framework_fingerprint(),
         "token": token,
         "different_indices": differing.tolist(),
-        "reference_faithful": compare_arrays(reference["attn.attention_value"][token], ref_value),
+        "reference_faithful": compare_arrays(
+            reference["attn.attention_value"][token], ref_value
+        ),
         "pallas_faithful": compare_arrays(uninstrumented[0], value[0]),
         "historical_pallas_comparison": compare_arrays(
             actual["attn.attention_value"][token], value[0]
@@ -237,7 +250,9 @@ def main():
         not report["fixed_value"]["bitwise_equal"]
         or any(not stage["bitwise_equal"] for stage in report["stages"].values())
     ):
-        raise AssertionError("original HCA scratch/output does not match the retained query")
+        raise AssertionError(
+            "original HCA scratch/output does not match the retained query"
+        )
 
 
 if __name__ == "__main__":

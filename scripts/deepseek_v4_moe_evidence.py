@@ -13,7 +13,10 @@ def compiled_moe_evidence(text, *, layers=43, backend="gmm"):
     if backend not in ("gmm", "gmm_tuned"):
         raise ValueError("GMM evidence requires an explicit grouped backend")
     family = (
-        "gmm_checkpoint_fp4_candidate_scale_kn_packed_scale-"
+        (
+            "gmm_checkpoint_fp4_candidate_scale_kn_packed_scale-",
+            "gmm_checkpoint_fp4_tiled_scale_kn_packed_scale-",
+        )
         if backend == "gmm_tuned"
         else "gmm_checkpoint_fp4-"
     )

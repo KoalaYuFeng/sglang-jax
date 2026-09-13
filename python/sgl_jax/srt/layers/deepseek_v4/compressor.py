@@ -3,16 +3,18 @@
 import jax
 import jax.numpy as jnp
 
-from sgl_jax.srt.kernels.deepseek_v4.numerics import hadamard_rotate, rms_norm, rope
 from sgl_jax.srt.kernels.low_bit.formats import (
     activation_fp4_roundtrip,
     activation_fp8_roundtrip,
     round_bf16,
 )
+from sgl_jax.srt.layers.deepseek_v4.numerics import hadamard_rotate, rms_norm, rope
 
 
 def physical_locations(metadata, requests, positions):
-    requests = requests.reshape(requests.shape + (1,) * (positions.ndim - requests.ndim))
+    requests = requests.reshape(
+        requests.shape + (1,) * (positions.ndim - requests.ndim)
+    )
     logical_page = jnp.clip(positions // 128, 0, metadata.page_table.shape[1] - 1)
     pages = metadata.page_table[requests, logical_page]
     return pages * 128 + positions % 128
@@ -22,7 +24,10 @@ def _initial_state(cache, prefix, metadata):
     """Page-aligned radix hits and fresh requests restore inside the donated call."""
     lengths = metadata.prefix_lens
     prior = (
-        physical_locations(metadata, jnp.arange(lengths.size), jnp.maximum(lengths - 1, 0)) // 128
+        physical_locations(
+            metadata, jnp.arange(lengths.size), jnp.maximum(lengths - 1, 0)
+        )
+        // 128
     )
     restore = (lengths > 0) & (lengths % 128 == 0)
     result = []
@@ -57,10 +62,14 @@ def _project(x, weight, metadata):
         return jax.lax.cond(
             item[1],
             lambda block: jax.lax.map(
-                lambda row: jnp.matmul(row[None], weight.T, preferred_element_type=jnp.float32)[0],
+                lambda row: jnp.matmul(
+                    row[None], weight.T, preferred_element_type=jnp.float32
+                )[0],
                 block,
             ),
-            lambda block: jnp.matmul(block, weight.T, preferred_element_type=jnp.float32),
+            lambda block: jnp.matmul(
+                block, weight.T, preferred_element_type=jnp.float32
+            ),
             item[0],
         )
 
@@ -87,7 +96,7 @@ def compress(
     prefix = "index" if index else "main"
     weight_prefix = "attn.indexer.compressor" if index else "attn.compressor"
     initial_values, initial_scores = _initial_state(cache, prefix, metadata)
-    from sgl_jax.srt.kernels.deepseek_v4 import csa, hca
+    from sgl_jax.srt.layers.deepseek_v4 import csa, hca
 
     hca.validate_backend(hca_backend)
     csa.validate_backend(csa_backend)
@@ -112,7 +121,9 @@ def compress(
         start = metadata.prefix_lens[requests, None]
         offsets = metadata.query_starts[requests, None] + positions - start
         rows = jnp.clip(offsets, 0, x.shape[0] - 1)
-        from_batch = (positions >= start) & (positions < metadata.seq_lens[requests, None])
+        from_batch = (positions >= start) & (
+            positions < metadata.seq_lens[requests, None]
+        )
         state_rows = positions % ratio
         if overlap:
             state_rows += jnp.where(positions >= (start // ratio) * ratio, ratio, 0)
@@ -127,12 +138,16 @@ def compress(
     group_requests = metadata.group4_requests if overlap else metadata.group128_requests
     group_starts = metadata.group4_starts if overlap else metadata.group128_starts
     span = ratio * (2 if overlap else 1)
-    positions = group_starts[:, None] + jnp.arange(span)[None] - (ratio if overlap else 0)
+    positions = (
+        group_starts[:, None] + jnp.arange(span)[None] - (ratio if overlap else 0)
+    )
     group_values, group_scores = projected_rows(group_requests, positions)
     raw_values, raw_scores = group_values, group_scores
     if trace is not None:
         trace.update(
-            raw_group_values=group_values, raw_group_scores=group_scores, group_positions=positions
+            raw_group_values=group_values,
+            raw_group_scores=group_scores,
+            group_positions=positions,
         )
     if overlap and (not original_csa or trace is not None):
         # v5p can mis-lower a concatenate of two doubly-sliced rank-3
@@ -141,7 +156,9 @@ def compress(
         # Pallas selects inside VMEM; a traced call only reconstructs a
         # diagnostic view here, not an observed intermediate of the kernel.
         columns = jnp.arange(dim)[None] + (jnp.arange(span) >= ratio)[:, None] * dim
-        columns = jnp.broadcast_to(columns, (group_starts.size, span, dim)).reshape(-1, dim)
+        columns = jnp.broadcast_to(columns, (group_starts.size, span, dim)).reshape(
+            -1, dim
+        )
         group_values = jnp.take_along_axis(
             group_values.reshape(-1, 2 * dim), columns, axis=1
         ).reshape(-1, span, dim)
@@ -157,7 +174,9 @@ def compress(
             # Raw inputs and csa_emitted are actual boundary observations.
             # Give the reconstructed views distinct names to avoid claiming
             # that a trace exported internal Pallas values.
-            trace.update(selected_view_values=group_values, selected_view_scores=group_scores)
+            trace.update(
+                selected_view_values=group_values, selected_view_scores=group_scores
+            )
         else:
             trace.update(group_values=group_values, group_scores=group_scores)
 
@@ -179,7 +198,9 @@ def compress(
         if trace is not None:
             trace["hca_emitted" if original_hca else "csa_emitted"] = pooled
     else:
-        pooled = round_bf16(jnp.sum(group_values * jax.nn.softmax(group_scores, axis=1), axis=1))
+        pooled = round_bf16(
+            jnp.sum(group_values * jax.nn.softmax(group_scores, axis=1), axis=1)
+        )
         if trace is not None:
             trace["pooled"] = pooled
         pooled = rms_norm(pooled, weights[weight_prefix + ".norm.weight"], config.eps)
@@ -215,7 +236,9 @@ def compress(
     page_ids = physical_locations(metadata, page_requests, page_end - 1) // 128
     for suffix, value in (("kv", snapshot_values), ("score", snapshot_scores)):
         key = f"{prefix}.snapshot_{suffix}"
-        destinations = jnp.where(metadata.group128_starts >= 0, page_ids, cache[key].shape[0])
+        destinations = jnp.where(
+            metadata.group128_starts >= 0, page_ids, cache[key].shape[0]
+        )
         cache[key] = cache[key].at[destinations].set(value, mode="drop")
 
     # Materialize each request's partial state independently. Zero-length padded
@@ -225,10 +248,14 @@ def compress(
     last_complete = (lengths[:, None] // ratio - 1) * ratio + rows
     current = (lengths[:, None] // ratio) * ratio + rows
     tail = jnp.where(rows < (lengths % ratio)[:, None], current, last_complete)
-    state_positions = jnp.concatenate((last_complete, tail), axis=1) if overlap else tail
+    state_positions = (
+        jnp.concatenate((last_complete, tail), axis=1) if overlap else tail
+    )
     live_values, live_scores = projected_rows(jnp.arange(lengths.size), state_positions)
     for suffix, value in (("kv", live_values), ("score", live_scores)):
         key = f"{prefix}.{suffix}"
-        destinations = jnp.where(metadata.query_lens > 0, metadata.req_slots, cache[key].shape[0])
+        destinations = jnp.where(
+            metadata.query_lens > 0, metadata.req_slots, cache[key].shape[0]
+        )
         cache[key] = cache[key].at[destinations].set(value, mode="drop")
     return cache

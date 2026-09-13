@@ -8,11 +8,16 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from sgl_jax.srt.kernels.deepseek_v4.compressor import compress
-from sgl_jax.srt.kernels.deepseek_v4.numerics import V4LayerConfig
 from sgl_jax.srt.layers.attention.deepseek_v4_paged_backend import V4PagedBackend
-from sgl_jax.srt.mem_cache.deepseek_v4_paged_pool import layer_buffer_specs, pool_size_bytes
-from sgl_jax.srt.model_executor.deepseek_v4_reference import compress as reference_compress
+from sgl_jax.srt.layers.deepseek_v4.compressor import compress
+from sgl_jax.srt.layers.deepseek_v4.numerics import V4LayerConfig
+from sgl_jax.srt.mem_cache.deepseek_v4_paged_pool import (
+    layer_buffer_specs,
+    pool_size_bytes,
+)
+from sgl_jax.srt.model_executor.deepseek_v4_reference import (
+    compress as reference_compress,
+)
 from sgl_jax.srt.model_executor.deepseek_v4_reference import empty_cache
 from sgl_jax.srt.model_executor.forward_batch_info import ForwardMode
 from sgl_jax.test.kernels.test_deepseek_v4_reference import _compressor_weights
@@ -269,7 +274,9 @@ def test_standard_allocator_radix_fork_eviction_and_pool_roundtrip():
 @pytest.mark.parametrize("logprobs", [False, True])
 def test_standard_logits_logprobs_and_hidden_capture(capture, logprobs):
     from flax import nnx
-    from jax.sharding import NamedSharding, PartitionSpec as P
+    from jax.sharding import NamedSharding
+    from jax.sharding import PartitionSpec as P
+
     from sgl_jax.srt.layers.embeddings import ParallelLMHead
     from sgl_jax.srt.layers.logits_processor import LogitsMetadata
     from sgl_jax.srt.model_executor.forward_batch_info import CaptureHiddenMode
@@ -282,29 +289,39 @@ def test_standard_logits_logprobs_and_hidden_capture(capture, logprobs):
     rng = np.random.default_rng(68)
     with jax.set_mesh(mesh):
         hidden = jax.device_put(
-            rng.normal(size=(8, 128)).astype(jnp.bfloat16), NamedSharding(mesh, P("data", None))
+            rng.normal(size=(8, 128)).astype(jnp.bfloat16),
+            NamedSharding(mesh, P("data", None)),
         )
         head = ParallelLMHead(32, 128, mesh=mesh, dtype=jnp.bfloat16)
         weight = rng.normal(size=(32, 128)).astype(jnp.bfloat16)
-        head.embedding = nnx.Param(jax.device_put(weight, NamedSharding(mesh, P("tensor", None))))
-        array = lambda a: jax.device_put(np.asarray(a, np.int32), NamedSharding(mesh, P("data")))
+        head.embedding = nnx.Param(
+            jax.device_put(weight, NamedSharding(mesh, P("tensor", None)))
+        )
+        array = lambda a: jax.device_put(
+            np.asarray(a, np.int32), NamedSharding(mesh, P("data"))
+        )
         meta = LogitsMetadata(
             forward_mode=ForwardMode.EXTEND,
             capture_hidden_mode=CaptureHiddenMode(capture),
             logits_indices=array([2, 6]),
             extend_return_logprob=logprobs,
             input_logprob_indices_device=array([0, 1, 3, 4, 5]) if logprobs else None,
-            extend_input_logprob_token_ids_device=array([1, 2, 4, 5, 6]) if logprobs else None,
+            extend_input_logprob_token_ids_device=(
+                array([1, 2, 4, 5, 6]) if logprobs else None
+            ),
         )
         processor = V4LogitsProcessor(32, mesh)
-        output = nnx.jit(lambda processor, head, hidden, meta: processor(hidden, head, meta))(
-            processor, head, hidden, meta
-        )
+        output = nnx.jit(
+            lambda processor, head, hidden, meta: processor(hidden, head, meta)
+        )(processor, head, hidden, meta)
     expected = np.asarray(hidden, np.float32) @ weight.astype(np.float32).T
-    np.testing.assert_allclose(output.next_token_logits, expected[[2, 6]], rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(
+        output.next_token_logits, expected[[2, 6]], rtol=1e-5, atol=1e-5
+    )
     if capture:
         np.testing.assert_array_equal(
-            output.hidden_states, np.asarray(hidden) if capture == 2 else np.asarray(hidden)[[2, 6]]
+            output.hidden_states,
+            np.asarray(hidden) if capture == 2 else np.asarray(hidden)[[2, 6]],
         )
     else:
         assert output.hidden_states is None
@@ -338,8 +355,10 @@ def test_invalid_ownership_fails_before_dispatch(field, value):
 
 @pytest.mark.parametrize("hash_routing", [False, True])
 def test_packed_router_preserves_each_requests_absolute_lane(hash_routing):
-    from sgl_jax.srt.kernels.deepseek_v4.moe import route
-    from sgl_jax.srt.model_executor.deepseek_v4_reference import route as reference_route
+    from sgl_jax.srt.layers.deepseek_v4.moe import route
+    from sgl_jax.srt.model_executor.deepseek_v4_reference import (
+        route as reference_route,
+    )
 
     rng = np.random.default_rng(43)
     config = V4LayerConfig(hidden=128, hash_routing=hash_routing)
@@ -352,10 +371,16 @@ def test_packed_router_preserves_each_requests_absolute_lane(hash_routing):
     }
     batch = make_batch([3, 127], [11, 5], padding=3)
     meta = V4PagedBackend(max_context=384).get_forward_metadata(batch)
-    actual_ids, actual_weights = jax.jit(lambda x: route(x, ids, weights, config, meta))(x)
+    actual_ids, actual_weights = jax.jit(
+        lambda x: route(x, ids, weights, config, meta)
+    )(x)
     for start, end, prefix in ((0, 11, 3), (11, 16, 127)):
         expected_ids, expected_weights = reference_route(
-            x[start:end], jnp.arange(prefix, prefix + end - start), ids[start:end], weights, config
+            x[start:end],
+            jnp.arange(prefix, prefix + end - start),
+            ids[start:end],
+            weights,
+            config,
         )
         np.testing.assert_array_equal(actual_ids[start:end], expected_ids)
         np.testing.assert_array_equal(actual_weights[start:end], expected_weights)
@@ -363,9 +388,11 @@ def test_packed_router_preserves_each_requests_absolute_lane(hash_routing):
 
 
 def test_grouped_fp4_dispatch_matches_unpacked_token_order():
-    from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
-    from sgl_jax.srt.kernels.deepseek_v4.moe import grouped_fp4_experts
+    from jax.sharding import Mesh, NamedSharding
+    from jax.sharding import PartitionSpec as P
+
     from sgl_jax.srt.kernels.low_bit.moe import routed_fp4_experts
+    from sgl_jax.srt.layers.deepseek_v4.moe import grouped_fp4_experts
     from sgl_jax.test.kernels.test_deepseek_v4_low_bit import _fixture_weight
 
     mesh = Mesh(np.asarray(jax.devices()), ("tensor",))
@@ -374,23 +401,30 @@ def test_grouped_fp4_dispatch_matches_unpacked_token_order():
     weights, scales = [], []
     for projection in range(3):
         pairs = [
-            _fixture_weight("fp4", 128, 128, seed=100 * projection + i) for i in range(experts)
+            _fixture_weight("fp4", 128, 128, seed=100 * projection + i)
+            for i in range(experts)
         ]
         weights.append(
             jax.device_put(
-                np.stack([w for w, s in pairs]), NamedSharding(mesh, P("tensor", None, None))
+                np.stack([w for w, s in pairs]),
+                NamedSharding(mesh, P("tensor", None, None)),
             )
         )
         scales.append(
             jax.device_put(
-                np.stack([s for w, s in pairs]), NamedSharding(mesh, P("tensor", None, None))
+                np.stack([s for w, s in pairs]),
+                NamedSharding(mesh, P("tensor", None, None)),
             )
         )
-    x = jax.device_put(rng.normal(size=(19, 128)).astype(jnp.bfloat16), NamedSharding(mesh, P()))
+    x = jax.device_put(
+        rng.normal(size=(19, 128)).astype(jnp.bfloat16), NamedSharding(mesh, P())
+    )
     ids = jax.device_put(
         rng.integers(0, experts, (19, 2), dtype=np.int32), NamedSharding(mesh, P())
     )
-    routes = jax.device_put(rng.uniform(size=(19, 2)).astype(np.float32), NamedSharding(mesh, P()))
+    routes = jax.device_put(
+        rng.uniform(size=(19, 2)).astype(np.float32), NamedSharding(mesh, P())
+    )
     routes = routes.at[-3:].set(0)
 
     def run(function):
@@ -471,8 +505,10 @@ def test_index_score_jit_cannot_elide_official_bf16_rounding():
 @pytest.mark.parametrize("context", [8192, 8320])
 def test_8k_page_index_topk_and_compressor_boundary(context, official_rope_reference):
     """8K address space with >512 candidates and two independent terminal pages."""
-    from sgl_jax.srt.kernels.deepseek_v4.attention import attention
-    from sgl_jax.srt.model_executor.deepseek_v4_reference import attention as reference_attention
+    from sgl_jax.srt.layers.deepseek_v4.attention import attention
+    from sgl_jax.srt.model_executor.deepseek_v4_reference import (
+        attention as reference_attention,
+    )
 
     config = V4LayerConfig(
         hidden=128,
@@ -489,9 +525,14 @@ def test_8k_page_index_topk_and_compressor_boundary(context, official_rope_refer
     rng = np.random.default_rng(8192)
     weights = attention_weights(config)
     page_count = context // 128
-    pages = [list(range(1, 2 * page_count + 1, 2)), list(range(2, 2 * page_count + 1, 2))]
+    pages = [
+        list(range(1, 2 * page_count + 1, 2)),
+        list(range(2, 2 * page_count + 1, 2)),
+    ]
     batch = make_batch([context - 1, context - 129], [1, 1], pages=pages, decode=True)
-    metadata = V4PagedBackend(max_context=context, capacity=2 * context).get_forward_metadata(batch)
+    metadata = V4PagedBackend(
+        max_context=context, capacity=2 * context
+    ).get_forward_metadata(batch)
     cache = make_cache(config, capacity=2 * context)
     references = []
     for request in range(2):
@@ -513,9 +554,13 @@ def test_8k_page_index_topk_and_compressor_boundary(context, official_rope_refer
             x, pos, weights, cache, config, meta, loc
         )
     )
-    actual, updated = run(x, batch.positions, cache, metadata, batch.out_cache_loc, weights)
+    actual, updated = run(
+        x, batch.positions, cache, metadata, batch.out_cache_loc, weights
+    )
     ref_run = jax.jit(
-        lambda x, pos, cache, weights: reference_attention(x, pos, weights, cache, config)
+        lambda x, pos, cache, weights: reference_attention(
+            x, pos, weights, cache, config
+        )
     )
     for request in range(2):
         expected, ref_cache, trace = ref_run(
@@ -539,9 +584,13 @@ def test_8k_page_index_topk_and_compressor_boundary(context, official_rope_refer
 
 
 @pytest.mark.parametrize("ratio", [0, 4, 128])
-def test_paged_attention_matches_independent_requests_and_batched_decode(ratio, official_rope_reference):
-    from sgl_jax.srt.kernels.deepseek_v4.attention import attention
-    from sgl_jax.srt.model_executor.deepseek_v4_reference import attention as reference_attention
+def test_paged_attention_matches_independent_requests_and_batched_decode(
+    ratio, official_rope_reference
+):
+    from sgl_jax.srt.layers.deepseek_v4.attention import attention
+    from sgl_jax.srt.model_executor.deepseek_v4_reference import (
+        attention as reference_attention,
+    )
 
     config = V4LayerConfig(
         hidden=128,
@@ -557,7 +606,10 @@ def test_paged_attention_matches_independent_requests_and_batched_decode(ratio, 
     )
     weights = attention_weights(config)
     rng = np.random.default_rng(12)
-    inputs = [jnp.asarray(rng.normal(size=(length, 128)), jnp.bfloat16) for length in (130, 133)]
+    inputs = [
+        jnp.asarray(rng.normal(size=(length, 128)), jnp.bfloat16)
+        for length in (130, 133)
+    ]
     backend = V4PagedBackend(max_context=384)
     expected_caches = []
     outputs = []
@@ -567,7 +619,9 @@ def test_paged_attention_matches_independent_requests_and_batched_decode(ratio, 
         )[:2]
     )
     for x in inputs:
-        output, cache = ref(x[:-1], jnp.arange(len(x) - 1), empty_cache(config), weights)
+        output, cache = ref(
+            x[:-1], jnp.arange(len(x) - 1), empty_cache(config), weights
+        )
         outputs.append(output)
         expected_caches.append(cache)
 
@@ -605,7 +659,9 @@ def test_paged_attention_matches_independent_requests_and_batched_decode(ratio, 
                     )
     np.testing.assert_array_equal(actual[:261], jnp.concatenate(outputs))
     np.testing.assert_array_equal(actual[261:], 0)
-    batch = make_batch([132, 129], [1, 1], slots=[1, 0], pages=[[4, 6, 5], [1, 3, 2]], decode=True)
+    batch = make_batch(
+        [132, 129], [1, 1], slots=[1, 0], pages=[[4, 6, 5], [1, 3, 2]], decode=True
+    )
     actual, _ = run(
         jnp.stack([inputs[1][-1], inputs[0][-1]]),
         batch.positions,

@@ -11,12 +11,15 @@ from flax import nnx
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 
-from sgl_jax.srt.configs.deepseek_v4 import validate_v4_server_args
-from sgl_jax.srt.layers.attention.deepseek_v4_backend import DeepseekV4Backend, DeepseekV4Metadata
-from sgl_jax.srt.mem_cache.deepseek_v4_pool import DeepseekV4TokenToKVPool
 from sgl_jax.srt.mem_cache.memory_pool import MemoryPools
 from sgl_jax.srt.model_executor.deepseek_v4_reference import ReferenceConfig
 from sgl_jax.srt.model_executor.forward_batch_info import ForwardMode
+from sgl_jax.test.deepseek_v4_legacy import (
+    DeepseekV4Backend,
+    DeepseekV4Metadata,
+    DeepseekV4TokenToKVPool,
+    validate_v4_server_args,
+)
 
 
 def _batch(count=4, mode=ForwardMode.EXTEND, length=None, prefix=0):
@@ -341,11 +344,11 @@ def test_four_device_model_runner_and_sampler_contract(monkeypatch):
         pytest.skip("requires four CPU devices or four TPU devices")
     import sgl_jax.srt.models.deepseek_v4 as native
     from sgl_jax.srt.configs.deepseek_v4 import DeepseekV4Config
-    from sgl_jax.srt.layers.logits_processor import LogitsMetadata
     from sgl_jax.srt.layers.attention.deepseek_v4_paged_backend import V4PagedBackend
-    from sgl_jax.srt.mem_cache.deepseek_v4_paged_pool import V4PagedKVPool
+    from sgl_jax.srt.layers.logits_processor import LogitsMetadata
     from sgl_jax.srt.layers.sampler import Sampler
     from sgl_jax.srt.managers.schedule_batch import ModelWorkerSamplingInfo
+    from sgl_jax.srt.mem_cache.deepseek_v4_paged_pool import V4PagedKVPool
     from sgl_jax.srt.model_executor.compilation_manager import CompilationManager
     from sgl_jax.srt.model_executor.forward_batch_info import ForwardBatch
     from sgl_jax.srt.model_executor.model_runner import ModelRunner
@@ -398,12 +401,15 @@ def test_four_device_model_runner_and_sampler_contract(monkeypatch):
         model.layers = nnx.Param(tuple({"value": value} for _ in range(43)))
         model.embed_tokens.embedding = nnx.Param(
             jax.device_put(
-                np.ones((32, 8), np.float32).astype(jnp.bfloat16), NamedSharding(mesh, P())
+                np.ones((32, 8), np.float32).astype(jnp.bfloat16),
+                NamedSharding(mesh, P()),
             )
         )
         model.lm_head.embedding = nnx.Param(
             jax.device_put(
-                np.broadcast_to(np.arange(1, 33)[:, None], (32, 8)).astype(jnp.bfloat16),
+                np.broadcast_to(np.arange(1, 33)[:, None], (32, 8)).astype(
+                    jnp.bfloat16
+                ),
                 NamedSharding(mesh, P("tensor", None)),
             )
         )
@@ -418,7 +424,9 @@ def test_four_device_model_runner_and_sampler_contract(monkeypatch):
         return hidden, updates
 
     monkeypatch.setattr(native, "whole_model_forward", core)
-    sa = ServerArgs(model_path="dummy", device=jax.default_backend(), moe_backend="epmoe")
+    sa = ServerArgs(
+        model_path="dummy", device=jax.default_backend(), moe_backend="epmoe"
+    )
     runner = object.__new__(ModelRunner)
     runner.model, runner.mesh, runner.server_args = model, mesh, sa
     runner.sampler = Sampler(nnx.Rngs(42), mesh)
@@ -437,18 +445,24 @@ def test_four_device_model_runner_and_sampler_contract(monkeypatch):
     cm = CompilationManager(sa, 1, 8, 1, 4, 1, 255, 32)
     cache_sizes = []
     for position in range(4):
-        batch = cm._make_dummy_batch(1, 1, ForwardMode.DECODE, 256, dp_size=1, per_dp_bs_size=1)
+        batch = cm._make_dummy_batch(
+            1, 1, ForwardMode.DECODE, 256, dp_size=1, per_dp_bs_size=1
+        )
         batch.positions = np.asarray([position], np.int32)
         batch.seq_lens = np.asarray([position + 1], np.int32)
         batch.out_cache_loc = np.asarray([128 + position], np.int32)
         batch.cache_loc[:128] = np.arange(128, 256, dtype=np.int32)
-        batch.sampling_info = ModelWorkerSamplingInfo.generate_for_precompile_all_greedy(1, 32)
+        batch.sampling_info = (
+            ModelWorkerSamplingInfo.generate_for_precompile_all_greedy(1, 32)
+        )
         batch.sampling_info.vocab_mask = None
         forward_batch = ForwardBatch.init_new(batch, runner)
         output, _, _ = runner.forward(
             forward_batch, LogitsMetadata.from_model_worker_batch(batch, mesh)
         )
-        np.testing.assert_array_equal(np.asarray(output.next_token_logits), np.arange(32)[None] + 1)
+        np.testing.assert_array_equal(
+            np.asarray(output.next_token_logits), np.arange(32)[None] + 1
+        )
         sample_metadata = SamplingMetadata.from_model_worker_batch(batch, 0, mesh, 32)
         # Several legacy TPU test modules install a process-global Explicit
         # mesh at import time. Production samples outside an Explicit mesh;

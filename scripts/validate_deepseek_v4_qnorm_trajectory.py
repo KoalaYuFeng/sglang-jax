@@ -23,11 +23,12 @@ from deepseek_v4_attention_candidates import make_compensated_qnorm
 from deepseek_v4_numerical_acceptance import tensor_metrics
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
+
 from sgl_jax.srt.kernels.deepseek_v4 import normalization
-from sgl_jax.srt.kernels.deepseek_v4.dense import DenseKernels
-from sgl_jax.srt.kernels.deepseek_v4.mhc import head_collapse
-from sgl_jax.srt.kernels.deepseek_v4.numerics import config_for_layer
 from sgl_jax.srt.layers.attention.deepseek_v4_paged_backend import V4PagedBackend
+from sgl_jax.srt.layers.deepseek_v4.linear import DenseKernels
+from sgl_jax.srt.layers.deepseek_v4.mhc import head_collapse
+from sgl_jax.srt.layers.deepseek_v4.numerics import config_for_layer
 from sgl_jax.srt.model_loader.deepseek_v4_checkpoint import DeepSeekV4Checkpoint
 from sgl_jax.srt.model_loader.deepseek_v4_native import load_layer, weight_specs
 from sgl_jax.srt.models.deepseek_v4 import DeepseekV4DecoderLayer, attention_uses_tp

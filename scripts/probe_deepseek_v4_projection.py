@@ -13,14 +13,17 @@ from unittest.mock import patch
 import jax
 import jax.numpy as jnp
 import numpy as np
-
 from debug_deepseek_v4_8023 import load_arrays, save_arrays
 from replay_deepseek_v4_8023 import difference
-from sgl_jax.srt.kernels.deepseek_v4.numerics import config_for_layer, _fixed_tree_sum_last
+
 from sgl_jax.srt.layers.attention.deepseek_v4_paged_backend import V4PagedMetadata
+from sgl_jax.srt.layers.deepseek_v4.numerics import (
+    _fixed_tree_sum_last,
+    config_for_layer,
+)
 from sgl_jax.srt.model_loader.deepseek_v4_checkpoint import DeepSeekV4Checkpoint
 
-MODULE = importlib.import_module("sgl_jax.srt.kernels.deepseek_v4.compressor")
+MODULE = importlib.import_module("sgl_jax.srt.layers.deepseek_v4.compressor")
 
 
 def projector(mode):

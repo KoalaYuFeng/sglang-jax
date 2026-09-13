@@ -4,8 +4,8 @@ import gc
 
 import jax
 import numpy as np
-from jax.sharding import NamedSharding, PartitionSpec as P
-
+from jax.sharding import NamedSharding
+from jax.sharding import PartitionSpec as P
 
 HEAD_SHARDED_WEIGHTS = frozenset(
     {
@@ -46,7 +46,10 @@ def load_layer(
     prefix = f"layers.{layer_id}."
     weights = {}
     pending = {}
-    from sgl_jax.srt.kernels.deepseek_v4.projections import MERGED_PROJECTIONS, pack_merged_weights
+    from sgl_jax.srt.model_loader.deepseek_v4_packing import (
+        MERGED_PROJECTIONS,
+        pack_merged_weights,
+    )
 
     merged_keys = (
         {
@@ -73,8 +76,12 @@ def load_layer(
                 or np.any(value < 0)
                 or np.any(value >= checkpoint.config["n_routed_experts"])
             ):
-                raise ValueError(f"unexpected/out-of-range integer checkpoint field: {name}")
-            value = value.astype(np.int32)  # Lossless routing-index conversion, not weights.
+                raise ValueError(
+                    f"unexpected/out-of-range integer checkpoint field: {name}"
+                )
+            value = value.astype(
+                np.int32
+            )  # Lossless routing-index conversion, not weights.
         weights[key] = jax.device_put(
             value, NamedSharding(mesh, _weight_spec(key, value.ndim, attention_tp))
         )
@@ -92,7 +99,9 @@ def load_layer(
             arrays, scale_arrays = [], []
             for shard, device in enumerate(devices):
                 experts = [
-                    checkpoint.load_linear(f"layers.{layer_id}.ffn.experts.{expert}.w{projection}")
+                    checkpoint.load_linear(
+                        f"layers.{layer_id}.ffn.experts.{expert}.w{projection}"
+                    )
                     for expert in range(shard * local_count, (shard + 1) * local_count)
                 ]
                 data = np.stack([expert.data for expert in experts])
@@ -103,7 +112,10 @@ def load_layer(
                 scale_arrays.append(jax.device_put(scales, device).block_until_ready())
                 del experts, data, scales
             sharding = NamedSharding(mesh, P("tensor", None, None))
-            for key, parts in ((f"w{projection}", arrays), (f"s{projection}", scale_arrays)):
+            for key, parts in (
+                (f"w{projection}", arrays),
+                (f"s{projection}", scale_arrays),
+            ):
                 shape = (total, *parts[0].shape[1:])
                 weights["experts." + key] = jax.make_array_from_single_device_arrays(
                     shape, sharding, parts

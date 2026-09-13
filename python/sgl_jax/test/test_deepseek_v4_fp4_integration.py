@@ -6,11 +6,15 @@ import jax
 import ml_dtypes
 import numpy as np
 import pytest
-from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
+from jax.sharding import Mesh, NamedSharding
+from jax.sharding import PartitionSpec as P
 
-from sgl_jax.srt.kernels.deepseek_v4.moe_gmm import gmm_fp4_experts
-from sgl_jax.srt.kernels.low_bit.fp4_tuning import tuned_fp4_tile_m
-from sgl_jax.srt.model_loader.deepseek_v4_native import load_layer, original_fp4_scale_view
+from sgl_jax.srt.kernels.low_bit.fp4 import tuned_fp4_tile_m
+from sgl_jax.srt.layers.deepseek_v4.moe import gmm_fp4_experts
+from sgl_jax.srt.model_loader.deepseek_v4_native import (
+    load_layer,
+    original_fp4_scale_view,
+)
 from sgl_jax.test.test_deepseek_v4_moe_gmm import _weights
 
 

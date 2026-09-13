@@ -1,13 +1,19 @@
 """Compare ragged compressor intermediates to host arithmetic on small fixtures."""
 
 import json
+
 import jax
 import jax.numpy as jnp
 import numpy as np
-from sgl_jax.srt.kernels.deepseek_v4.compressor import compress
-from sgl_jax.srt.kernels.deepseek_v4.numerics import V4LayerConfig
+
 from sgl_jax.srt.layers.attention.deepseek_v4_paged_backend import V4PagedBackend
-from sgl_jax.test.test_deepseek_v4_paged import make_batch, make_cache, _compressor_weights
+from sgl_jax.srt.layers.deepseek_v4.compressor import compress
+from sgl_jax.srt.layers.deepseek_v4.numerics import V4LayerConfig
+from sgl_jax.test.test_deepseek_v4_paged import (
+    _compressor_weights,
+    make_batch,
+    make_cache,
+)
 
 
 def main():

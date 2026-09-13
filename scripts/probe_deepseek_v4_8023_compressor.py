@@ -14,15 +14,15 @@ from unittest.mock import patch
 import jax
 import jax.numpy as jnp
 import numpy as np
-
 from debug_deepseek_v4_8023 import load_arrays, save_arrays
 from replay_deepseek_v4_8023 import difference, logical_cache
 from run_deepseek_v4_framework import framework_fingerprint
-from sgl_jax.srt.kernels.deepseek_v4.numerics import config_for_layer
+
 from sgl_jax.srt.layers.attention.deepseek_v4_paged_backend import V4PagedMetadata
+from sgl_jax.srt.layers.deepseek_v4.numerics import config_for_layer
 from sgl_jax.srt.model_loader.deepseek_v4_checkpoint import DeepSeekV4Checkpoint
 
-COMPRESSOR = importlib.import_module("sgl_jax.srt.kernels.deepseek_v4.compressor")
+COMPRESSOR = importlib.import_module("sgl_jax.srt.layers.deepseek_v4.compressor")
 MATMUL = jnp.matmul
 
 

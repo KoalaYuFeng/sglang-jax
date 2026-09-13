@@ -1466,4 +1466,13 @@ def uniform_prefill_attention(
     )
 
 
-__all__ = ["INERT_QUERY_OFFSET", "ragged_attention", "uniform_prefill_attention"]
+# Tensor-only streaming entry for callers that already own physical pages and
+# query/window metadata. Keep the implementation name for internal callers.
+streaming_attention_pallas = _streaming_attention
+
+__all__ = [
+    "INERT_QUERY_OFFSET",
+    "ragged_attention",
+    "uniform_prefill_attention",
+    "streaming_attention_pallas",
+]

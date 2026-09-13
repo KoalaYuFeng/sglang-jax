@@ -8,9 +8,10 @@ import jax.numpy as jnp
 import ml_dtypes
 import numpy as np
 import pytest
-from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
+from jax.sharding import Mesh, NamedSharding
+from jax.sharding import PartitionSpec as P
 
-from sgl_jax.srt.kernels.deepseek_v4.collectives import ordered_ep_sum
+from sgl_jax.srt.layers.deepseek_v4.collectives import ordered_ep_sum
 
 SOURCE = Path(__file__).resolve().parents[3] / "scripts/deepseek_v4_ep_reference.py"
 spec = importlib.util.spec_from_file_location("independent_ep_reference", SOURCE)

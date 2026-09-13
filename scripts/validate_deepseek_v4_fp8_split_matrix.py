@@ -12,9 +12,10 @@ from analyze_deepseek_v4_native_profile import fingerprint
 from debug_deepseek_v4_fp8_accumulator import SplitKDiagnostic
 from deepseek_v4_attention_diagnostics import fp8_roundtrip_cpu
 from deepseek_v4_bf16_reference import round_bf16_direct
-from sgl_jax.srt.kernels.deepseek_v4.fp8 import CheckpointFP8Rhs
+
 from sgl_jax.srt.kernels.gmm.megablox_gmm_kernel.gmm import gmm
 from sgl_jax.srt.kernels.low_bit.formats import activation_fp8_roundtrip
+from sgl_jax.srt.kernels.low_bit.fp8 import CheckpointFP8Rhs
 from sgl_jax.srt.model_loader.deepseek_v4_checkpoint import DeepSeekV4Checkpoint
 
 

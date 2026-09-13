@@ -19,9 +19,10 @@ from analyze_deepseek_v4_native_profile import fingerprint
 from deepseek_v4_numerical_acceptance import tensor_metrics
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
-from sgl_jax.srt.kernels.deepseek_v4.dense import DenseKernels
-from sgl_jax.srt.kernels.deepseek_v4.numerics import config_for_layer
+
 from sgl_jax.srt.layers.attention.deepseek_v4_paged_backend import V4PagedBackend
+from sgl_jax.srt.layers.deepseek_v4.linear import DenseKernels
+from sgl_jax.srt.layers.deepseek_v4.numerics import config_for_layer
 from sgl_jax.srt.model_loader.deepseek_v4_checkpoint import DeepSeekV4Checkpoint
 from sgl_jax.srt.model_loader.deepseek_v4_native import load_layer, weight_specs
 from sgl_jax.srt.models.deepseek_v4 import DeepseekV4DecoderLayer, attention_uses_tp
@@ -64,7 +65,7 @@ def main():
         fp4_scale_transposed=True,
     )
     model_module = importlib.import_module("sgl_jax.srt.models.deepseek_v4")
-    moe_module = importlib.import_module("sgl_jax.srt.kernels.deepseek_v4.moe")
+    moe_module = importlib.import_module("sgl_jax.srt.layers.deepseek_v4.moe")
     original_attn, original_moe = model_module.attention, model_module.moe
     original_pre, original_post = model_module.mhc_pre_fused, model_module.mhc_post
     original_route = moe_module.route

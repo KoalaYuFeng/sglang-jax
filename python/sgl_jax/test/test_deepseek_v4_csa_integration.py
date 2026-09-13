@@ -9,22 +9,28 @@ import numpy as np
 import pytest
 
 from sgl_jax.srt.kernels.csa.compressor import csa_emit_selected_pallas
-from sgl_jax.srt.kernels.deepseek_v4 import csa
-from sgl_jax.srt.kernels.deepseek_v4.compressor import _project, compress, physical_locations
-from sgl_jax.srt.kernels.deepseek_v4.numerics import (
+from sgl_jax.srt.kernels.low_bit.formats import activation_fp4_roundtrip, round_bf16
+from sgl_jax.srt.layers.attention.deepseek_v4_paged_backend import V4PagedBackend
+from sgl_jax.srt.layers.deepseek_v4 import csa
+from sgl_jax.srt.layers.deepseek_v4.compressor import (
+    _project,
+    compress,
+    physical_locations,
+)
+from sgl_jax.srt.layers.deepseek_v4.numerics import (
     V4LayerConfig,
     _single_query_attention,
     rms_norm,
     rope,
 )
-from sgl_jax.srt.kernels.low_bit.formats import activation_fp4_roundtrip, round_bf16
-from sgl_jax.srt.layers.attention.deepseek_v4_paged_backend import V4PagedBackend
 from sgl_jax.test.kernels.csa_compressor_cases import make_case, select_channels
 from sgl_jax.test.kernels.test_deepseek_v4_reference import _compressor_weights
 from sgl_jax.test.test_deepseek_v4_paged import make_batch, make_cache
 
 CONFIG = V4LayerConfig(ratio=4, max_context=8192)
-TPU = pytest.mark.skipif(jax.default_backend() != "tpu", reason="real Mosaic lowering required")
+TPU = pytest.mark.skipif(
+    jax.default_backend() != "tpu", reason="real Mosaic lowering required"
+)
 
 
 def close(expected, actual, tolerance):

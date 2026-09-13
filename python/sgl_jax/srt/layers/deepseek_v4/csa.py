@@ -15,24 +15,34 @@ from sgl_jax.srt.kernels.csa.compressor import (
 )
 from sgl_jax.srt.kernels.csa.indexer import paged_lightning_topk
 from sgl_jax.srt.kernels.csa.joint_attention import joint_attention_pallas
-from sgl_jax.srt.kernels.deepseek_v4.numerics import rope_angles
+from sgl_jax.srt.layers.deepseek_v4.numerics import rope_angles
 
 
 def validate_backend(backend):
     if backend not in ("pallas", "reference"):
-        raise ValueError("V4 CSA backend must be pallas or reference; no automatic fallback")
+        raise ValueError(
+            "V4 CSA backend must be pallas or reference; no automatic fallback"
+        )
     return backend
 
 
 def validate_config(config):
-    if (config.ratio, config.head_dim, config.index_dim, config.rope_dim, config.window) != (
+    if (
+        config.ratio,
+        config.head_dim,
+        config.index_dim,
+        config.rope_dim,
+        config.window,
+    ) != (
         4,
         512,
         128,
         64,
         128,
     ):
-        raise ValueError("original CSA V4 adapter requires r4/d512/index128/rope64/window128")
+        raise ValueError(
+            "original CSA V4 adapter requires r4/d512/index128/rope64/window128"
+        )
 
 
 def project(x, wkv, wgate, metadata, config, *, decode_batch=False):
@@ -43,7 +53,9 @@ def project(x, wkv, wgate, metadata, config, *, decode_batch=False):
         # Invalid slot-aligned rows compute zero and never own request state.
         if x.shape[0] != metadata.query_lens.shape[0]:
             raise ValueError("batched CSA projection requires slot-aligned pure decode")
-        projected = csa_project_decode_pallas(jnp.where(metadata.token_valid[:, None], x, 0), fused)
+        projected = csa_project_decode_pallas(
+            jnp.where(metadata.token_valid[:, None], x, 0), fused
+        )
         return projected[:, : wkv.shape[0]], projected[:, wkv.shape[0] :]
     rows = metadata.router_rows
     blocks = jnp.where((rows >= 0)[..., None], x[jnp.maximum(rows, 0)], 0)
@@ -102,9 +114,15 @@ def select(query, mixing, index_cache, metadata, config):
     lengths = metadata.query_lens
     order = jnp.argsort(lengths == 0, stable=True)
     inverse = jnp.zeros_like(order).at[order].set(jnp.arange(len(order)))
-    cumulative = jnp.concatenate((jnp.zeros((1,), jnp.int32), jnp.cumsum(lengths[order])))
+    cumulative = jnp.concatenate(
+        (jnp.zeros((1,), jnp.int32), jnp.cumsum(lengths[order]))
+    )
     request = metadata.token_requests
-    packed_row = cumulative[inverse[request]] + jnp.arange(tokens) - metadata.query_starts[request]
+    packed_row = (
+        cumulative[inverse[request]]
+        + jnp.arange(tokens)
+        - metadata.query_starts[request]
+    )
     destination = jnp.where(metadata.token_valid, packed_row, tokens)
     packed_query = jnp.zeros_like(query).at[destination].set(query, mode="drop")
     packed_mixing = jnp.zeros_like(mixing).at[destination].set(mixing, mode="drop")
@@ -124,7 +142,10 @@ def select(query, mixing, index_cache, metadata, config):
         return_scores=True,
     )
     rows = jnp.clip(packed_row, 0, tokens - 1)
-    return jnp.where(metadata.token_valid[:, None], scores[rows], -jnp.inf), selected[rows]
+    return (
+        jnp.where(metadata.token_valid[:, None], scores[rows], -jnp.inf),
+        selected[rows],
+    )
 
 
 def attend(query, window, window_valid, selected, selected_lengths, sink, config):

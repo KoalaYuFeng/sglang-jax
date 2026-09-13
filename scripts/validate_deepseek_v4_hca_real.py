@@ -13,15 +13,15 @@ from pathlib import Path
 import jax
 import jax.numpy as jnp
 import numpy as np
-from jax.sharding import Mesh
-
 from debug_deepseek_v4_8023 import load_arrays, save_arrays
+from jax.sharding import Mesh
 from run_deepseek_v4_framework import compare_arrays, framework_fingerprint
-from sgl_jax.srt.kernels.deepseek_v4 import hca
-from sgl_jax.srt.kernels.deepseek_v4.attention import attention
-from sgl_jax.srt.kernels.deepseek_v4.numerics import config_for_layer, rms_norm, rope
+
 from sgl_jax.srt.kernels.low_bit.formats import activation_fp8_roundtrip, round_bf16
 from sgl_jax.srt.layers.attention.deepseek_v4_paged_backend import V4PagedMetadata
+from sgl_jax.srt.layers.deepseek_v4 import hca
+from sgl_jax.srt.layers.deepseek_v4.attention import attention
+from sgl_jax.srt.layers.deepseek_v4.numerics import config_for_layer, rms_norm, rope
 from sgl_jax.srt.model_loader.deepseek_v4_checkpoint import DeepSeekV4Checkpoint
 from sgl_jax.srt.model_loader.deepseek_v4_native import load_layer
 
@@ -37,11 +37,18 @@ def main():
     replay = json.loads((args.replay / "report.json").read_text())
     if (
         not replay["faithful"]
-        or replay["framework_source_fingerprint"] != source["framework_source_fingerprint"]
+        or replay["framework_source_fingerprint"]
+        != source["framework_source_fingerprint"]
     ):
-        raise ValueError("requires a faithful replay of the matching historical capture")
+        raise ValueError(
+            "requires a faithful replay of the matching historical capture"
+        )
     checkpoint = DeepSeekV4Checkpoint(source["checkpoint"])
-    layers = [i for i, ratio in enumerate(checkpoint.config["compress_ratios"]) if ratio == 128]
+    layers = [
+        i
+        for i, ratio in enumerate(checkpoint.config["compress_ratios"])
+        if ratio == 128
+    ]
     selected = [layers[0], layers[len(layers) // 2], layers[-1]]
     report = {
         "complete": False,
@@ -99,10 +106,19 @@ def main():
                     inputs = load_arrays(folder / "inputs")
                     meta = V4PagedMetadata(**load_arrays(folder / "metadata"))
                     before = load_arrays(folder / "before" / f"layer-{layer:02d}")
-                    x = load_arrays(args.replay / f"{frame}-layer-{layer:02d}-trace")["attn.norm"]
+                    x = load_arrays(args.replay / f"{frame}-layer-{layer:02d}-trace")[
+                        "attn.norm"
+                    ]
                     call = jax.tree.map(
                         jnp.asarray,
-                        (x, inputs["positions"], weights, before, meta, inputs["locations"]),
+                        (
+                            x,
+                            inputs["positions"],
+                            weights,
+                            before,
+                            meta,
+                            inputs["locations"],
+                        ),
                     )
                     expected, ref_cache, ref_trace = reference(*call)
                     actual, got_cache, got_trace = candidate(*call)
@@ -143,7 +159,9 @@ def main():
                         expected_emit = jax.jit(
                             lambda v, s, n, p, cfg=config: rope(
                                 rms_norm(
-                                    round_bf16(jnp.sum(v * jax.nn.softmax(s, axis=1), axis=1)),
+                                    round_bf16(
+                                        jnp.sum(v * jax.nn.softmax(s, axis=1), axis=1)
+                                    ),
                                     n,
                                     cfg.eps,
                                 ),
@@ -161,10 +179,15 @@ def main():
                                 cfg,
                             )
                         )(values, scores, norm, starts)
-                        check(label + "/real_boundary_emit", expected_emit, got_emit, 2e-4)
+                        check(
+                            label + "/real_boundary_emit", expected_emit, got_emit, 2e-4
+                        )
                         quantize = jax.jit(
                             lambda value: jnp.concatenate(
-                                (activation_fp8_roundtrip(value[:, :-64], 64), value[:, -64:]),
+                                (
+                                    activation_fp8_roundtrip(value[:, :-64], 64),
+                                    value[:, -64:],
+                                ),
                                 axis=1,
                             )
                         )
@@ -174,7 +197,15 @@ def main():
                             quantize(got_emit),
                             0.005,
                         )
-                    del call, expected, actual, ref_cache, got_cache, ref_trace, got_trace
+                    del (
+                        call,
+                        expected,
+                        actual,
+                        ref_cache,
+                        got_cache,
+                        ref_trace,
+                        got_trace,
+                    )
                 del weights
         report["complete"] = True
     except BaseException:

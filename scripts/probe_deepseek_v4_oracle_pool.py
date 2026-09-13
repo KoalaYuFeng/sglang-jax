@@ -11,11 +11,11 @@ from pathlib import Path
 import ml_dtypes
 import numpy as np
 import torch
-
 from debug_deepseek_v4_8023 import load_arrays, save_arrays
 from replay_deepseek_v4_8023 import difference, logical_cache
-from sgl_jax.srt.kernels.deepseek_v4.numerics import config_for_layer
+
 from sgl_jax.srt.layers.attention.deepseek_v4_paged_backend import V4PagedMetadata
+from sgl_jax.srt.layers.deepseek_v4.numerics import config_for_layer
 from sgl_jax.srt.model_loader.deepseek_v4_checkpoint import DeepSeekV4Checkpoint
 from sgl_jax.test.deepseek_v4_cpu_oracle import load_module_weights, official_module
 

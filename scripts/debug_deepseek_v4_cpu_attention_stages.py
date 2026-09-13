@@ -21,11 +21,13 @@ from deepseek_v4_attention_diagnostics import align_masked_indices
 from deepseek_v4_numerical_acceptance import tensor_metrics
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
-from sgl_jax.srt.kernels.deepseek_v4 import projections
-from sgl_jax.srt.kernels.deepseek_v4.attention import attention
-from sgl_jax.srt.kernels.deepseek_v4.dense import DenseKernels
-from sgl_jax.srt.kernels.deepseek_v4.numerics import config_for_layer
+
+from sgl_jax.srt.kernels.deepseek_v4 import projection_kernels
 from sgl_jax.srt.layers.attention.deepseek_v4_paged_backend import V4PagedBackend
+from sgl_jax.srt.layers.deepseek_v4 import linear as v4_linear
+from sgl_jax.srt.layers.deepseek_v4.attention import attention
+from sgl_jax.srt.layers.deepseek_v4.linear import DenseKernels
+from sgl_jax.srt.layers.deepseek_v4.numerics import config_for_layer
 from sgl_jax.srt.model_loader.deepseek_v4_checkpoint import DeepSeekV4Checkpoint
 from sgl_jax.srt.model_loader.deepseek_v4_native import load_layer, weight_specs
 from sgl_jax.test.deepseek_v4_cpu_oracle import load_module_weights, official_module
@@ -70,8 +72,8 @@ def main():
     )
     original_linear, original_merged, original_wo_a = (
         DenseKernels.linear,
-        projections.merged_linear,
-        projections.inverse_rope_fp8_wo_a,
+        v4_linear.merged_linear,
+        projection_kernels.inverse_rope_fp8_wo_a,
     )
 
     def run(value, positions, w, cache, metadata, locations):
@@ -95,8 +97,8 @@ def main():
         with ExitStack() as stack:
             for target, key, fn in (
                 (DenseKernels, "linear", linear),
-                (projections, "merged_linear", merged),
-                (projections, "inverse_rope_fp8_wo_a", wo_a),
+                (v4_linear, "merged_linear", merged),
+                (projection_kernels, "inverse_rope_fp8_wo_a", wo_a),
             ):
                 stack.enter_context(patch.object(target, key, fn))
             out, cache = attention(

@@ -7,13 +7,18 @@ import jax.numpy as jnp
 import ml_dtypes
 import numpy as np
 import pytest
-from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
+from jax.sharding import Mesh, NamedSharding
+from jax.sharding import PartitionSpec as P
 
-from sgl_jax.srt.kernels.deepseek_v4.moe import grouped_fp4_experts, validate_backend
-from sgl_jax.srt.kernels.deepseek_v4.moe_gmm import gmm_fp4_experts, pack_routes
 from sgl_jax.srt.kernels.gmm.megablox_gmm_kernel.gmm import gmm, make_group_metadata
-from sgl_jax.srt.kernels.low_bit.gmm import grouped_fp4_matmul
+from sgl_jax.srt.kernels.low_bit.fp4 import grouped_fp4_matmul
 from sgl_jax.srt.kernels.low_bit.matmul import low_bit_matmul
+from sgl_jax.srt.layers.deepseek_v4.moe import (
+    gmm_fp4_experts,
+    grouped_fp4_experts,
+    pack_routes,
+    validate_backend,
+)
 from sgl_jax.test.kernels.test_deepseek_v4_low_bit import (
     _assert_close,
     _bf16,
@@ -244,14 +249,16 @@ def test_mismatched_expert_parallel_contract_rejected():
 
 @pytest.mark.parametrize("backend", ["gmm", "gmm_tuned"])
 def test_selected_gmm_failure_does_not_fall_back(monkeypatch, backend):
-    from sgl_jax.srt.kernels.deepseek_v4 import moe as module, moe_gmm
+    from sgl_jax.srt.layers.deepseek_v4 import moe as module
 
     monkeypatch.setattr(module, "route", lambda *args: (None, None))
 
     def failed(*args, **kwargs):
         raise RuntimeError("injected GMM failure")
 
-    monkeypatch.setattr(moe_gmm, "gmm_fp4_experts", failed)
+    monkeypatch.setattr(module, "gmm_fp4_experts", failed)
     weights = {"experts." + key: None for key in ("w1", "w3", "w2", "s1", "s3", "s2")}
     with pytest.raises(RuntimeError, match="injected GMM failure"):
-        module.moe(None, None, weights, SimpleNamespace(swiglu_limit=10), None, backend=backend)
+        module.moe(
+            None, None, weights, SimpleNamespace(swiglu_limit=10), None, backend=backend
+        )

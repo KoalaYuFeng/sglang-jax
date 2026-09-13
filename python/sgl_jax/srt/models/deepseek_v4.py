@@ -10,18 +10,21 @@ from dataclasses import replace
 import jax
 import jax.numpy as jnp
 from flax import nnx
-from jax.sharding import NamedSharding, PartitionSpec as P
+from jax.sharding import NamedSharding
+from jax.sharding import PartitionSpec as P
 
-from sgl_jax.srt.kernels.deepseek_v4.attention import attention
-from sgl_jax.srt.kernels.deepseek_v4.csa import validate_backend as validate_csa_backend
-from sgl_jax.srt.kernels.deepseek_v4.dense import DenseKernels
-from sgl_jax.srt.kernels.deepseek_v4.hca import validate_backend as validate_hca_backend
-from sgl_jax.srt.kernels.deepseek_v4.mhc import head_collapse, post as mhc_post, validate_backend
-from sgl_jax.srt.kernels.deepseek_v4.moe import moe, validate_backend as validate_moe_backend
-from sgl_jax.srt.kernels.deepseek_v4.numerics import (
-    config_for_layer,
-)
+from sgl_jax.srt.configs.deepseek_v4_execution import DEFAULTS, options_from_config
 from sgl_jax.srt.kernels.mhc import mhc_pre_fused
+from sgl_jax.srt.layers.deepseek_v4.attention import attention
+from sgl_jax.srt.layers.deepseek_v4.csa import validate_backend as validate_csa_backend
+from sgl_jax.srt.layers.deepseek_v4.hca import validate_backend as validate_hca_backend
+from sgl_jax.srt.layers.deepseek_v4.linear import DenseKernels
+from sgl_jax.srt.layers.deepseek_v4.mhc import head_collapse
+from sgl_jax.srt.layers.deepseek_v4.mhc import post as mhc_post
+from sgl_jax.srt.layers.deepseek_v4.mhc import validate_backend
+from sgl_jax.srt.layers.deepseek_v4.moe import moe
+from sgl_jax.srt.layers.deepseek_v4.moe import validate_backend as validate_moe_backend
+from sgl_jax.srt.layers.deepseek_v4.numerics import config_for_layer
 from sgl_jax.srt.layers.embeddings import Embed, ParallelLMHead
 from sgl_jax.srt.layers.logits_processor import LogitsProcessor
 from sgl_jax.srt.model_executor.forward_batch_info import ForwardMode
@@ -29,13 +32,6 @@ from sgl_jax.srt.model_loader.deepseek_v4_checkpoint import DeepSeekV4Checkpoint
 from sgl_jax.srt.model_loader.deepseek_v4_native import load_layer, weight_specs
 
 logger = logging.getLogger(__name__)
-
-
-def _boolean_option(config, name):
-    value = getattr(config, name, False)
-    if type(value) is not bool:
-        raise ValueError(f"{name} must be a boolean")
-    return value
 
 
 def attention_uses_tp(config, enabled):
@@ -63,12 +59,12 @@ class DeepseekV4DecoderLayer(nnx.Module):
         self,
         config,
         *,
-        mhc_backend="pallas",
-        hca_backend="pallas",
-        csa_backend="pallas",
-        moe_backend="legacy",
-        attention_tp=False,
-        csa_decode_batch=False,
+        mhc_backend=DEFAULTS["mhc_backend"],
+        hca_backend=DEFAULTS["hca_backend"],
+        csa_backend=DEFAULTS["csa_backend"],
+        moe_backend=DEFAULTS["moe_backend"],
+        attention_tp=DEFAULTS["attention_tp"],
+        csa_decode_batch=DEFAULTS["csa_decode_batch"],
         dense_kernels=DenseKernels(),
     ):
         self.config = local_attention_config(config, attention_tp)
@@ -136,12 +132,12 @@ def whole_model_forward(
     locations,
     *,
     configs,
-    mhc_backend="pallas",
-    hca_backend="pallas",
-    csa_backend="pallas",
-    moe_backend="legacy",
-    attention_tp=False,
-    csa_decode_batch=False,
+    mhc_backend=DEFAULTS["mhc_backend"],
+    hca_backend=DEFAULTS["hca_backend"],
+    csa_backend=DEFAULTS["csa_backend"],
+    moe_backend=DEFAULTS["moe_backend"],
+    attention_tp=DEFAULTS["attention_tp"],
+    csa_decode_batch=DEFAULTS["csa_decode_batch"],
     dense_kernels=DenseKernels(),
 ):
     """All layers and request-local cache updates in one device program."""
@@ -208,24 +204,12 @@ class DeepseekV4ForCausalLM(nnx.Module):
 
     def __init__(self, config, mesh, dtype=jnp.bfloat16):
         self.mesh, self.dtype = mesh, dtype
-        self.mhc_backend = validate_backend(getattr(config, "v4_mhc_backend", "pallas"))
-        self.hca_backend = validate_hca_backend(getattr(config, "v4_hca_backend", "pallas"))
-        self.csa_backend = validate_csa_backend(getattr(config, "v4_csa_backend", "pallas"))
-        self.moe_backend = validate_moe_backend(getattr(config, "v4_moe_backend", "legacy"))
-        self.attention_tp = _boolean_option(config, "v4_attention_tp")
-        self.csa_decode_batch = _boolean_option(config, "v4_csa_decode_batch")
-        self.fp8_backend = getattr(config, "v4_fp8_backend", "legacy")
-        self.fused_norm = _boolean_option(config, "v4_fused_norm")
-        self.merged_projections = _boolean_option(config, "v4_merged_projections")
-        self.fused_wo_a = _boolean_option(config, "v4_fused_wo_a")
+        for name, value in options_from_config(config).items():
+            setattr(self, name, value)
         self.dense_kernels = DenseKernels(
             self.fp8_backend, self.fused_norm, self.merged_projections, self.fused_wo_a
         )
         logger.info("V4 experimental dense kernels: %s", self.dense_kernels)
-        if self.csa_decode_batch and self.csa_backend != "pallas":
-            raise ValueError("batched CSA decode requires the original Pallas projection")
-        if self.attention_tp and (self.csa_backend != "pallas" or self.hca_backend != "pallas"):
-            raise ValueError("V4 attention TP requires the independently validated Pallas paths")
         logger.info(
             "V4 attention TP4=%s (CSA/HCA only; SWA/index/compressor/KV replicated); "
             "batched CSA decode=%s",

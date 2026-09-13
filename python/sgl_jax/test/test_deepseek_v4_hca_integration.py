@@ -9,23 +9,29 @@ import ml_dtypes
 import numpy as np
 import pytest
 
-from sgl_jax.srt.kernels.deepseek_v4 import hca
-from sgl_jax.srt.kernels.deepseek_v4.compressor import _project, compress, physical_locations
-from sgl_jax.srt.kernels.deepseek_v4.numerics import (
+from sgl_jax.srt.kernels.hca.attention import _v4_probability_sum_64
+from sgl_jax.srt.kernels.hca.compressor import _hca_emit_selected_pallas
+from sgl_jax.srt.kernels.low_bit.formats import round_bf16
+from sgl_jax.srt.layers.attention.deepseek_v4_paged_backend import V4PagedBackend
+from sgl_jax.srt.layers.deepseek_v4 import hca
+from sgl_jax.srt.layers.deepseek_v4.compressor import (
+    _project,
+    compress,
+    physical_locations,
+)
+from sgl_jax.srt.layers.deepseek_v4.numerics import (
     V4LayerConfig,
     _single_query_attention,
     rms_norm,
     rope,
 )
-from sgl_jax.srt.kernels.low_bit.formats import round_bf16
-from sgl_jax.srt.kernels.hca.compressor import _hca_emit_selected_pallas
-from sgl_jax.srt.kernels.hca.attention import _v4_probability_sum_64
-from sgl_jax.srt.layers.attention.deepseek_v4_paged_backend import V4PagedBackend
 from sgl_jax.test.kernels.test_deepseek_v4_reference import _compressor_weights
 from sgl_jax.test.test_deepseek_v4_paged import make_batch, make_cache
 
 CONFIG = V4LayerConfig(ratio=128, max_context=384)
-TPU = pytest.mark.skipif(jax.default_backend() != "tpu", reason="real Mosaic lowering required")
+TPU = pytest.mark.skipif(
+    jax.default_backend() != "tpu", reason="real Mosaic lowering required"
+)
 
 
 def close(a, b, tolerance=2e-4, *, label=""):

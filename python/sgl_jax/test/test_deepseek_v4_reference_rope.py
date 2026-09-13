@@ -7,8 +7,11 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from sgl_jax.srt.kernels.deepseek_v4.numerics import rope
-from sgl_jax.test.deepseek_v4_reference_rope import official_frequencies, official_recipe_rope
+from sgl_jax.srt.layers.deepseek_v4.numerics import rope
+from sgl_jax.test.deepseek_v4_reference_rope import (
+    official_frequencies,
+    official_recipe_rope,
+)
 from sgl_jax.test.test_deepseek_v4_rope_numerics import FLASH, FLASH_FREQUENCY_BITS
 
 

@@ -6,64 +6,24 @@ times include their fused online dequantization, not a separately measured cost.
 """
 
 import ast
-import hashlib
 import json
 import re
 import sys
 from pathlib import Path
 
 import analyze_deepseek_v4_profile as base
+from deepseek_v4_source import framework_fingerprint as fingerprint
 
 ROOT = Path(__file__).resolve().parents[1] / "python/sgl_jax/srt"
 
 
-def fingerprint():
-    paths = [
-        ROOT / "model_executor/deepseek_v4_reference.py",
-        ROOT / "model_loader/deepseek_v4_checkpoint.py",
-    ]
-    for directory in ("kernels/low_bit", "kernels/mhc"):
-        paths.extend((ROOT / directory).glob("*.py"))
-    reference = hashlib.sha256()
-    for path in sorted(paths):
-        reference.update(str(path.relative_to(ROOT)).encode() + b"\0" + path.read_bytes())
-    digest = hashlib.sha256(reference.hexdigest().encode())
-    names = [
-        "configs/deepseek_v4.py",
-        "configs/model_config.py",
-        "hf_transformers_utils.py",
-        "models/deepseek_v4.py",
-        "model_loader/deepseek_v4_native.py",
-        "layers/attention/deepseek_v4_backend.py",
-        "layers/attention/deepseek_v4_paged_backend.py",
-        "mem_cache/deepseek_v4_pool.py",
-        "mem_cache/deepseek_v4_paged_pool.py",
-        "model_executor/model_runner.py",
-        "model_executor/model_runner_kv_cache_mixin.py",
-        "model_executor/compilation_manager.py",
-        "kernels/gmm/routing.py",
-        "kernels/gmm/megablox_gmm_kernel/gmm.py",
-        "kernels/gmm/megablox_gmm_kernel/common.py",
-        "kernels/gmm/megablox_gmm_kernel/tuned_block_sizes.py",
-    ]
-    names.extend(
-        str(p.relative_to(ROOT)) for p in sorted((ROOT / "kernels/deepseek_v4").glob("*.py"))
-    )
-    names.extend(str(p.relative_to(ROOT)) for p in sorted((ROOT / "kernels/hca").glob("*.py")))
-    names.extend(str(p.relative_to(ROOT)) for p in sorted((ROOT / "kernels/csa").glob("*.py")))
-    names.append("kernels/dsa/streamindex_topk.py")
-    for name in names:
-        digest.update(name.encode() + b"\0" + (ROOT / name).read_bytes())
-    return digest.hexdigest()
-
-
 def build_ranges():
     result = {}
-    for name in ("compressor", "moe", "attention", "numerics"):
-        path = ROOT / f"kernels/deepseek_v4/{name}.py"
+    for name in ("compressor", "moe", "attention", "numerics", "linear"):
+        path = ROOT / f"layers/deepseek_v4/{name}.py"
         result[name] = [
             (node.lineno, node.end_lineno, node.name)
-            for node in ast.parse(path.read_text()).body
+            for node in ast.walk(ast.parse(path.read_text()))
             if isinstance(node, ast.FunctionDef)
         ]
     return result
@@ -72,6 +32,18 @@ def build_ranges():
 ORIGINAL_STAGE = base.event_stage
 ORIGINAL_HLO_SUMMARY = base.summarize_hlo_table
 NATIVE_RANGES = build_ranges()
+
+
+def source_functions(stack, module):
+    """Resolve current model-adapter frames without fixed source line numbers."""
+    return {
+        name
+        for match in re.finditer(
+            r"/layers/deepseek_v4/" + module + r"\.py:(\d+)", stack
+        )
+        for start, end, name in NATIVE_RANGES.get(module, ())
+        if start <= int(match[1]) <= end
+    }
 
 
 def native_stage(event, ranges):
@@ -90,8 +62,20 @@ def native_stage(event, ranges):
             if "/deepseek_v4/attention.py:" in stack
             else "non_moe_collectives_including_wait"
         )
-    if "/deepseek_v4/moe_gmm.py:" in stack or "/kernels/low_bit/gmm.py:" in stack:
+    if any(
+        path in stack
+        for path in (
+            "/deepseek_v4/moe_gmm.py:",
+            "/kernels/low_bit/gmm.py:",
+            "/kernels/low_bit/fp4.py:",
+        )
+    ):
         return "routed_fp4_experts_including_online_dequant"
+    moe_functions = source_functions(stack, "moe")
+    if moe_functions & {"grouped_fp4_experts", "gmm_fp4_experts"}:
+        return "routed_fp4_experts_including_online_dequant"
+    if moe_functions & {"route", "pack_routes"}:
+        return "router"
     if "/kernels/mhc/" in stack:
         return "mhc"
     if "/kernels/hca/compressor.py:" in stack:
@@ -102,7 +86,10 @@ def native_stage(event, ranges):
         return "compressor_and_paged_state"
     if "/kernels/csa/joint_attention.py:" in stack:
         return "sparse_attention"
-    if "/kernels/csa/indexer.py:" in stack or "/kernels/dsa/streamindex_topk.py:" in stack:
+    if (
+        "/kernels/csa/indexer.py:" in stack
+        or "/kernels/dsa/streamindex_topk.py:" in stack
+    ):
         return "attention_topk" if category == "sort" else "attention_index_scores"
     # Attribute the actual attention reduction before its outer projection
     # caller; the generic normalization/linear helpers must not win here.
@@ -117,13 +104,23 @@ def native_stage(event, ranges):
             line = int(match[1])
             names = [name for start, end, name in source_ranges if start <= line <= end]
             if module == "moe":
-                if "grouped_fp4_experts" in names:
+                if any(
+                    name in names for name in ("grouped_fp4_experts", "gmm_fp4_experts")
+                ):
                     return "routed_fp4_experts_including_online_dequant"
-                return "router" if "route" in names else "shared_experts_and_moe_combine"
+                return (
+                    "router"
+                    if any(name in names for name in ("route", "pack_routes"))
+                    else "shared_experts_and_moe_combine"
+                )
             if module == "compressor":
                 return "compressor_and_paged_state"
             if module == "attention":
-                return "attention_topk" if category == "sort" else "attention_projection_and_index"
+                return (
+                    "attention_topk"
+                    if category == "sort"
+                    else "attention_projection_and_index"
+                )
             if "_single_query_attention" in names:
                 return "sparse_attention"
             if "official_head_collapse" in names:

@@ -1,7 +1,9 @@
-"""V4 numerical primitives for the native serving kernels.
+"""V4 model numerical rules and retained fallback arithmetic.
 
 Keep checkpoint arithmetic explicit. The independent bring-up reference stays
-unchanged so serving adapters can be checked against it.
+unchanged so serving adapters can be checked against it. Tensor-only Pallas
+implementations live under kernels/; this module owns V4 configuration,
+checkpoint names and model-specific rounding/operation order.
 """
 
 import functools
@@ -90,7 +92,9 @@ def _rope_frequencies(rd, base, original_seq_len, factor, beta_fast, beta_slow):
 
         def correction(rotations):
             return (
-                rd * math.log(original_seq_len / (rotations * 2 * math.pi)) / (2 * math.log(base))
+                rd
+                * math.log(original_seq_len / (rotations * 2 * math.pi))
+                / (2 * math.log(base))
             )
 
         low = max(math.floor(correction(beta_fast)), 0)
@@ -104,7 +108,10 @@ def _rope_frequencies(rd, base, original_seq_len, factor, beta_fast, beta_slow):
         smooth = np.float32(1) - ramp
         # Preserve both subtractions from the official FP32 recipe. Replacing
         # 1 - smooth with ramp is algebraically, but not numerically, equivalent.
-        frequency = frequency / np.float32(factor) * (np.float32(1) - smooth) + frequency * smooth
+        frequency = (
+            frequency / np.float32(factor) * (np.float32(1) - smooth)
+            + frequency * smooth
+        )
     frequency.flags.writeable = False
     return frequency
 
@@ -132,7 +139,9 @@ def rope(x, positions, config, *, inverse=False):
     paired = x[..., -rd:].astype(jnp.float32).reshape(*x.shape[:-1], rd // 2, 2)
     a, b = paired[..., 0], paired[..., 1]
     rotated = jnp.stack((a * cosine - b * sine, a * sine + b * cosine), axis=-1)
-    return jnp.concatenate((x[..., :-rd], round_bf16(rotated.reshape(*x.shape[:-1], rd))), axis=-1)
+    return jnp.concatenate(
+        (x[..., :-rd], round_bf16(rotated.reshape(*x.shape[:-1], rd))), axis=-1
+    )
 
 
 def hadamard_rotate(x):
@@ -155,7 +164,11 @@ def linear(x, weights, prefix, *, quantize=True):
     scales = weights.get(prefix + ".scale")
     fmt = "bf16" if scales is None else "fp8"
     return low_bit_matmul(
-        x, weight, scales, weight_format=fmt, quantize_activation=quantize and scales is not None
+        x,
+        weight,
+        scales,
+        weight_format=fmt,
+        quantize_activation=quantize and scales is not None,
     )
 
 
@@ -201,7 +214,10 @@ def official_head_collapse(streams, fn, scale, base, *, eps=1e-6, hc_eps=1e-6):
     inverse_rms = jax.lax.rsqrt(_fixed_tree_mean_last(flat * flat)[:, None] + eps)
     mixes = jnp.matmul(flat, fn.T, precision=jax.lax.Precision.HIGHEST) * inverse_rms
     pre = jax.nn.sigmoid(mixes * scale + base) + hc_eps
-    values = [pre[:, i, None] * streams[:, i].astype(jnp.float32) for i in range(streams.shape[1])]
+    values = [
+        pre[:, i, None] * streams[:, i].astype(jnp.float32)
+        for i in range(streams.shape[1])
+    ]
     return round_bf16(functools.reduce(jnp.add, values))
 
 

@@ -17,6 +17,7 @@ from collections import Counter
 from pathlib import Path
 
 import jax
+from analyze_deepseek_v4_native_profile import source_functions
 
 
 def collective_owners(table_path):
@@ -28,7 +29,9 @@ def collective_owners(table_path):
         if row["category"] != "all-reduce":
             continue
         source, operation = row.get("source_info") or "", row.get("tf_op_name") or ""
-        moe = "/deepseek_v4/moe_gmm.py:" in source
+        moe = "/deepseek_v4/moe_gmm.py:" in source or bool(
+            source_functions(source, "moe") & {"gmm_fp4_experts", "grouped_fp4_experts"}
+        )
         sampler = "jit(jitted_sampler)/Sampler/" in operation
         if moe == sampler:
             raise ValueError("unknown or ambiguous all-reduce source ownership")

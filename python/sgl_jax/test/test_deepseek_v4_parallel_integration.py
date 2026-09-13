@@ -7,11 +7,14 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
-from sgl_jax.srt.kernels.deepseek_v4 import csa
-from sgl_jax.srt.kernels.deepseek_v4.compressor import compress
-from sgl_jax.srt.kernels.deepseek_v4.numerics import V4LayerConfig
+from jax.sharding import Mesh, NamedSharding
+from jax.sharding import PartitionSpec as P
+
+from sgl_jax.srt.configs.deepseek_v4_execution import options_from_config
 from sgl_jax.srt.layers.attention.deepseek_v4_paged_backend import V4PagedBackend
+from sgl_jax.srt.layers.deepseek_v4 import csa
+from sgl_jax.srt.layers.deepseek_v4.compressor import compress
+from sgl_jax.srt.layers.deepseek_v4.numerics import V4LayerConfig
 from sgl_jax.srt.model_executor.forward_batch_info import ForwardMode
 from sgl_jax.srt.model_loader.deepseek_v4_native import (
     HEAD_SHARDED_WEIGHTS,
@@ -19,7 +22,6 @@ from sgl_jax.srt.model_loader.deepseek_v4_native import (
     weight_specs,
 )
 from sgl_jax.srt.models.deepseek_v4 import (
-    _boolean_option,
     attention_uses_tp,
     local_attention_config,
     use_batched_csa_decode,
@@ -27,7 +29,9 @@ from sgl_jax.srt.models.deepseek_v4 import (
 from sgl_jax.test.kernels.test_deepseek_v4_reference import _compressor_weights
 from sgl_jax.test.test_deepseek_v4_paged import make_batch, make_cache
 
-TPU = pytest.mark.skipif(jax.default_backend() != "tpu", reason="real Mosaic lowering required")
+TPU = pytest.mark.skipif(
+    jax.default_backend() != "tpu", reason="real Mosaic lowering required"
+)
 
 
 def assert_bits(expected, actual):
@@ -77,10 +81,10 @@ def test_only_csa_hca_localize_heads_without_changing_index_or_state_config(rati
 def test_head_tp_and_boolean_config_reject_ambiguous_inputs():
     with pytest.raises(ValueError, match="complete heads"):
         local_attention_config(V4LayerConfig(ratio=4, groups=3), True)
-    assert _boolean_option(SimpleNamespace(), "v4_attention_tp") is False
+    assert options_from_config(SimpleNamespace())["attention_tp"] is False
     for value in ("true", "false", 1, None):
         with pytest.raises(ValueError, match="boolean"):
-            _boolean_option(SimpleNamespace(v4_attention_tp=value), "v4_attention_tp")
+            options_from_config(SimpleNamespace(v4_attention_tp=value))
 
 
 @pytest.mark.parametrize("mode", [ForwardMode.EXTEND, ForwardMode.MIXED, ForwardMode.DECODE])

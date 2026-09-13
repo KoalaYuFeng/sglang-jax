@@ -13,13 +13,19 @@ import jax.numpy as jnp
 from jax.experimental import pallas as pl
 
 from sgl_jax.srt.kernels.gmm.megablox_gmm_kernel.gmm import gmm
-from sgl_jax.srt.kernels.low_bit.formats import activation_fp8_roundtrip, decode_e8m0, decode_fp8
+from sgl_jax.srt.kernels.low_bit.formats import (
+    activation_fp8_roundtrip,
+    decode_e8m0,
+    decode_fp8,
+)
 from sgl_jax.srt.kernels.low_bit.matmul import _expand_columns
 
 
 def decode_weight_tile(raw, scales):
     """A single output block's compact [1,K/128] scales, DMA-selected in GMM."""
-    return (decode_fp8(raw) * _expand_columns(decode_e8m0(scales), 128)).astype(jnp.bfloat16)
+    return (decode_fp8(raw) * _expand_columns(decode_e8m0(scales), 128)).astype(
+        jnp.bfloat16
+    )
 
 
 @dataclass(frozen=True)
@@ -45,14 +51,20 @@ class CheckpointFP8Rhs:
             raise ValueError("FP8 GMM requires matching K divisible by 128, up to 8192")
         if not lhs.shape[0] or lhs.shape[0] % 8 or not n or n % 128:
             raise ValueError("FP8 GMM requires M padded to 8 and N aligned to 128")
-        if group_sizes.ndim != 1 or group_sizes.dtype != jnp.int32 or group_sizes.size < groups:
+        if (
+            group_sizes.ndim != 1
+            or group_sizes.dtype != jnp.int32
+            or group_sizes.size < groups
+        ):
             raise ValueError("FP8 GMM requires int32 global group sizes")
         if (
             rhs_scale is None
             or rhs_scale.dtype != jnp.uint8
             or rhs_scale.shape != (groups, n // 128, 1, k // 128)
         ):
-            raise ValueError("FP8 GMM requires compact uint8[G,N/128,1,K/128] E8M0 scales")
+            raise ValueError(
+                "FP8 GMM requires compact uint8[G,N/128,1,K/128] E8M0 scales"
+            )
         if rhs_bias is not None:
             raise ValueError("checkpoint FP8 projections do not have a bias")
 

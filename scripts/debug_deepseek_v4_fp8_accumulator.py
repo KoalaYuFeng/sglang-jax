@@ -19,13 +19,14 @@ import torch
 from analyze_deepseek_v4_native_profile import fingerprint
 from deepseek_v4_attention_diagnostics import fp8_roundtrip_cpu
 from deepseek_v4_numerical_acceptance import tensor_metrics
-from sgl_jax.srt.kernels.deepseek_v4.fp8 import (
+
+from sgl_jax.srt.kernels.gmm.megablox_gmm_kernel.gmm import gmm
+from sgl_jax.srt.kernels.low_bit.formats import activation_fp8_roundtrip
+from sgl_jax.srt.kernels.low_bit.fp8 import (
     CheckpointFP8Rhs,
     decode_weight_tile,
     fp8_linear,
 )
-from sgl_jax.srt.kernels.gmm.megablox_gmm_kernel.gmm import gmm
-from sgl_jax.srt.kernels.low_bit.formats import activation_fp8_roundtrip
 from sgl_jax.srt.model_loader.deepseek_v4_checkpoint import DeepSeekV4Checkpoint
 
 

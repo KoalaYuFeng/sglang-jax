@@ -62,8 +62,10 @@ def test_observer_drain_preserves_engine_status_rpc(drain_timeout):
 
 
 def source(module, function):
-    line = next(start for start, _, name in profile.NATIVE_RANGES[module] if name == function)
-    return f"/repo/kernels/deepseek_v4/{module}.py:{line}:0"
+    line = next(
+        start for start, _, name in profile.NATIVE_RANGES[module] if name == function
+    )
+    return f"/repo/layers/deepseek_v4/{module}.py:{line}:0"
 
 
 def test_warm_statistics_exclude_cold_and_profiled_calls():

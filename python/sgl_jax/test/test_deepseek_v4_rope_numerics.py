@@ -19,7 +19,8 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from sgl_jax.srt.kernels.deepseek_v4.numerics import (
+from sgl_jax.srt.kernels.low_bit.formats import activation_fp4_roundtrip
+from sgl_jax.srt.layers.deepseek_v4.numerics import (
     V4LayerConfig,
     _rope_frequencies,
     config_for_layer,
@@ -27,7 +28,6 @@ from sgl_jax.srt.kernels.deepseek_v4.numerics import (
     rope,
     rope_angles,
 )
-from sgl_jax.srt.kernels.low_bit.formats import activation_fp4_roundtrip
 
 FLASH = V4LayerConfig(rope_base=160000.0, original_seq_len=65536, max_context=8192)
 # FP32 official-Python recipe from the frozen 2026-09-11 CSA-index diagnosis.

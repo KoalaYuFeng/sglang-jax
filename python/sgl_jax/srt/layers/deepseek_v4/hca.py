@@ -10,18 +10,20 @@ from dataclasses import replace
 import jax
 import jax.numpy as jnp
 
-from sgl_jax.srt.kernels.deepseek_v4.numerics import rope_angles
-from sgl_jax.srt.kernels.hca.attention import _streaming_attention
+from sgl_jax.srt.kernels.hca.attention import streaming_attention_pallas
 from sgl_jax.srt.kernels.hca.compressor import (
-    _hca_emit_selected_pallas,
+    hca_emit_selected_pallas,
     hca_project_fused_pallas,
 )
 from sgl_jax.srt.kernels.hca.tuned_block_sizes import get_hca_kernel_schedule
+from sgl_jax.srt.layers.deepseek_v4.numerics import rope_angles
 
 
 def validate_backend(backend):
     if backend not in ("pallas", "reference"):
-        raise ValueError("V4 HCA backend must be pallas or reference; no automatic fallback")
+        raise ValueError(
+            "V4 HCA backend must be pallas or reference; no automatic fallback"
+        )
     return backend
 
 
@@ -47,7 +49,9 @@ def schedule_for(config):
         projection_k_tile=config.hidden,
         projection_batch_tile_max=8,
         compressed_tile=64,
-        boundary_large_tile=4 if schedule.platform == "TPU v5p" else schedule.boundary_large_tile,
+        boundary_large_tile=(
+            4 if schedule.platform == "TPU v5p" else schedule.boundary_large_tile
+        ),
     )
 
 
@@ -79,7 +83,7 @@ def project(x, wkv, wgate, metadata, config):
 
 def emit(values, scores, norm_weight, starts, valid, config):
     phase = rope_angles(jnp.maximum(starts, 0), config)
-    return _hca_emit_selected_pallas(
+    return hca_emit_selected_pallas(
         jnp.stack((values, scores), axis=2),
         valid,
         norm_weight,
@@ -90,7 +94,9 @@ def emit(values, scores, norm_weight, starts, valid, config):
     )
 
 
-def attend(q, window_cache, compressed_cache, window_indices, positions, sink, metadata, config):
+def attend(
+    q, window_cache, compressed_cache, window_indices, positions, sink, metadata, config
+):
     window_valid = window_indices >= 0
     window_rows = jnp.where(
         window_valid[..., None], window_cache[jnp.maximum(window_indices, 0)], 0
@@ -99,7 +105,7 @@ def attend(q, window_cache, compressed_cache, window_indices, positions, sink, m
     # page sizes. Here page_size=1 maps the existing token page directly to its
     # compressed record; no request-major compressed KV copy is constructed.
     records = compressed_cache.reshape(-1, 1, 1, config.head_dim)
-    result = _streaming_attention(
+    result = streaming_attention_pallas(
         q,
         window_rows,
         jnp.sum(window_valid, axis=1),

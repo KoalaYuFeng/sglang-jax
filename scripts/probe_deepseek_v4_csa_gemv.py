@@ -13,12 +13,12 @@ import jax
 import jax.experimental.pallas as pl
 import jax.numpy as jnp
 import numpy as np
-from jax.experimental.pallas import tpu as pltpu
-
 from debug_deepseek_v4_8023 import load_arrays, save_arrays
+from jax.experimental.pallas import tpu as pltpu
 from replay_deepseek_v4_8023 import difference
-from sgl_jax.srt.kernels.deepseek_v4.compressor import _project
+
 from sgl_jax.srt.layers.attention.deepseek_v4_paged_backend import V4PagedBackend
+from sgl_jax.srt.layers.deepseek_v4.compressor import _project
 from sgl_jax.test.test_deepseek_v4_paged import make_batch
 
 

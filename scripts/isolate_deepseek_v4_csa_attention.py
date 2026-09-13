@@ -12,12 +12,15 @@ from pathlib import Path
 import jax
 import jax.numpy as jnp
 import numpy as np
-
 from debug_deepseek_v4_8023 import load_arrays, save_arrays
 from replay_deepseek_v4_8023 import difference
 from run_deepseek_v4_framework import framework_fingerprint
-from sgl_jax.srt.kernels.deepseek_v4 import csa
-from sgl_jax.srt.kernels.deepseek_v4.numerics import _single_query_attention, config_for_layer
+
+from sgl_jax.srt.layers.deepseek_v4 import csa
+from sgl_jax.srt.layers.deepseek_v4.numerics import (
+    _single_query_attention,
+    config_for_layer,
+)
 from sgl_jax.srt.model_loader.deepseek_v4_checkpoint import DeepSeekV4Checkpoint
 
 

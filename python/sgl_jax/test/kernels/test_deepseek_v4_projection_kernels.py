@@ -7,12 +7,16 @@ import jax.numpy as jnp
 import ml_dtypes
 import numpy as np
 import pytest
-from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
+from jax.sharding import Mesh, NamedSharding
+from jax.sharding import PartitionSpec as P
 
-from sgl_jax.srt.kernels.deepseek_v4 import normalization, numerics, projections
+from sgl_jax.srt.kernels.deepseek_v4 import normalization, projection_kernels
 from sgl_jax.srt.kernels.low_bit.formats import activation_fp8_roundtrip, round_bf16
-from sgl_jax.srt.kernels.deepseek_v4.fp8 import fp8_linear
+from sgl_jax.srt.kernels.low_bit.fp8 import fp8_linear
 from sgl_jax.srt.kernels.low_bit.matmul import low_bit_matmul
+from sgl_jax.srt.layers.deepseek_v4 import linear as v4_linear
+from sgl_jax.srt.layers.deepseek_v4 import numerics
+from sgl_jax.srt.model_loader import deepseek_v4_packing as projection_packing
 
 
 @pytest.fixture(autouse=True)
@@ -158,7 +162,7 @@ def test_inverse_rope_grouped_wo_a(m, groups):
 
     def candidate(x, w, s, positions):
         phase = numerics.rope_angles(positions, config)
-        return projections.inverse_rope_fp8_wo_a(
+        return projection_kernels.inverse_rope_fp8_wo_a(
             x, w, s, jnp.cos(phase), jnp.sin(phase), groups=groups
         )
 
@@ -181,20 +185,22 @@ def test_inverse_rope_grouped_wo_a(m, groups):
 
 def test_merged_packing_preserves_bytes_and_projections():
     weights = {}
-    for target, sources in projections.MERGED_PROJECTIONS.items():
+    for target, sources in projection_packing.MERGED_PROJECTIONS.items():
         for index, source in enumerate(sources):
             n = (index + 1) * 128 if target == "attn.wqkv_a" else 128
             x, w, s = inputs(9, 512, n, seed=41 + index)
             weights[source + ".weight"], weights[source + ".scale"] = w, s
     weights["attn.q_norm.weight"] = np.ones(128, ml_dtypes.bfloat16)
-    packed = projections.pack_merged_weights(weights)
-    assert sum(v.nbytes for v in packed.values()) == sum(v.nbytes for v in weights.values())
-    restored = projections.unpack_merged_weights(packed)
+    packed = projection_packing.pack_merged_weights(weights)
+    assert sum(v.nbytes for v in packed.values()) == sum(
+        v.nbytes for v in weights.values()
+    )
+    restored = projection_packing.unpack_merged_weights(packed)
     assert restored.keys() == weights.keys()
     for name, value in weights.items():
         np.testing.assert_array_equal(value, restored[name])
-    for target, sources in projections.MERGED_PROJECTIONS.items():
-        actual = projections.merged_linear(
+    for target, sources in projection_packing.MERGED_PROJECTIONS.items():
+        actual = v4_linear.merged_linear(
             jnp.asarray(x), {k: jnp.asarray(v) for k, v in packed.items()}, target, 128
         )
         for part, source in zip(actual, sources, strict=True):
@@ -212,14 +218,18 @@ def test_merged_packing_preserves_bytes_and_projections():
 def test_dense_options_and_merged_loader_contract():
     from types import SimpleNamespace
 
-    from sgl_jax.srt.kernels.deepseek_v4.dense import DenseKernels
+    from sgl_jax.srt.layers.deepseek_v4.linear import DenseKernels
     from sgl_jax.srt.model_loader.deepseek_v4_native import load_layer, weight_specs
 
-    for kwargs in ({"fp8_backend": "auto"}, {"merged_projections": True}, {"fused_norm": 1}):
+    for kwargs in (
+        {"fp8_backend": "auto"},
+        {"merged_projections": True},
+        {"fused_norm": 1},
+    ):
         with pytest.raises(ValueError):
             DenseKernels(**kwargs)
     tensors = {"attn.q_norm.weight": np.ones(128, ml_dtypes.bfloat16)}
-    for sources in projections.MERGED_PROJECTIONS.values():
+    for sources in projection_packing.MERGED_PROJECTIONS.values():
         for name in sources:
             _, w, s = inputs(1, 512, 128)
             tensors[name + ".weight"], tensors[name + ".scale"] = w, s
@@ -231,11 +241,16 @@ def test_dense_options_and_merged_loader_contract():
     mesh = Mesh(np.asarray(jax.devices()[:1]), ("tensor",))
     with jax.set_mesh(mesh):
         loaded = load_layer(
-            checkpoint, 2, mesh, include_experts=False, attention_tp=True, merged_projections=True
+            checkpoint,
+            2,
+            mesh,
+            include_experts=False,
+            attention_tp=True,
+            merged_projections=True,
         )
         for spec in weight_specs(loaded, attention_tp=True).values():
             assert spec == P()  # QA/KV/shared projections stay replicated.
-        for key, value in projections.unpack_merged_weights(loaded).items():
+        for key, value in projection_packing.unpack_merged_weights(loaded).items():
             np.testing.assert_array_equal(value, tensors[key])
 
 
@@ -289,7 +304,7 @@ def test_qnorm_and_grouped_wo_a_tp4():
         cos, sin = jnp.cos(phase), jnp.sin(phase)
         return (
             normalization.qnorm_rope(x, cos, sin),
-            projections.inverse_rope_fp8_wo_a(x, w, s, cos, sin, groups=2),
+            projection_kernels.inverse_rope_fp8_wo_a(x, w, s, cos, sin, groups=2),
         )
 
     with jax.set_mesh(mesh):

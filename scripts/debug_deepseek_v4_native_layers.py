@@ -8,16 +8,17 @@ from pathlib import Path
 import jax
 import jax.numpy as jnp
 import numpy as np
-from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
-
+from jax.sharding import Mesh, NamedSharding
+from jax.sharding import PartitionSpec as P
 from run_deepseek_v4_framework import compare_arrays, framework_fingerprint
-from sgl_jax.srt.kernels.deepseek_v4.attention import attention
-from sgl_jax.srt.kernels.deepseek_v4.mhc import post as mhc_post
-from sgl_jax.srt.kernels.deepseek_v4.moe import moe, route
-from sgl_jax.srt.kernels.deepseek_v4.numerics import config_for_layer, rms_norm
+
 from sgl_jax.srt.kernels.mhc import mhc_pre_fused
 from sgl_jax.srt.layers.attention.deepseek_v4_paged_backend import V4PagedBackend
-from sgl_jax.srt.model_executor.deepseek_v4_reference import layer_step, empty_cache
+from sgl_jax.srt.layers.deepseek_v4.attention import attention
+from sgl_jax.srt.layers.deepseek_v4.mhc import post as mhc_post
+from sgl_jax.srt.layers.deepseek_v4.moe import moe, route
+from sgl_jax.srt.layers.deepseek_v4.numerics import config_for_layer, rms_norm
+from sgl_jax.srt.model_executor.deepseek_v4_reference import empty_cache, layer_step
 from sgl_jax.srt.model_loader.deepseek_v4_checkpoint import DeepSeekV4Checkpoint
 from sgl_jax.srt.model_loader.deepseek_v4_native import load_layer, weight_specs
 from sgl_jax.test.test_deepseek_v4_paged import make_batch, make_cache

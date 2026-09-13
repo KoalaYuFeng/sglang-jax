@@ -4,17 +4,17 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import jax
 import numpy as np
 import pytest
-import jax
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "scripts"))
 import benchmark_deepseek_v4_attention_tp as experiment
 
-from sgl_jax.srt.kernels.deepseek_v4.numerics import V4LayerConfig
 from sgl_jax.srt.layers.attention.deepseek_v4_paged_backend import V4PagedBackend
+from sgl_jax.srt.layers.deepseek_v4.numerics import V4LayerConfig
 from sgl_jax.test.test_deepseek_v4_paged import make_batch
 
 

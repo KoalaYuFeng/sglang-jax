@@ -16,11 +16,11 @@ from pathlib import Path
 import jax
 import ml_dtypes
 import numpy as np
-from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
-
+from jax.sharding import Mesh, NamedSharding
+from jax.sharding import PartitionSpec as P
 from run_deepseek_v4_framework import compare_arrays, framework_fingerprint
-from sgl_jax.srt.kernels.deepseek_v4.moe import grouped_fp4_experts
-from sgl_jax.srt.kernels.deepseek_v4.moe_gmm import gmm_fp4_experts
+
+from sgl_jax.srt.layers.deepseek_v4.moe import gmm_fp4_experts, grouped_fp4_experts
 from sgl_jax.srt.model_loader.deepseek_v4_checkpoint import DeepSeekV4Checkpoint
 from sgl_jax.srt.model_loader.deepseek_v4_native import load_layer
 from sgl_jax.test.kernels.test_deepseek_v4_low_bit import (

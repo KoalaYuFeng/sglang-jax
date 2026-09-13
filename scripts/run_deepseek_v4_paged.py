@@ -28,13 +28,14 @@ from run_deepseek_v4_framework import (
     framework_fingerprint,
     memory_snapshot,
 )
+from transformers import AutoTokenizer
+
 from sgl_jax.srt.managers.schedule_batch import ModelWorkerSamplingInfo
 from sgl_jax.srt.managers.tp_worker import ModelWorker
 from sgl_jax.srt.model_executor.deepseek_v4_reference import DeepSeekV4Reference
 from sgl_jax.srt.model_executor.forward_batch_info import ForwardMode
 from sgl_jax.srt.server_args import ServerArgs
 from sgl_jax.srt.utils.mesh_utils import create_device_mesh
-from transformers import AutoTokenizer
 
 
 def server_args(checkpoint, context=384):
@@ -73,14 +74,16 @@ def reference_layers(runner):
     replicate FP8 head weights, but never expands expert weights to BF16.
     """
     with jax.set_mesh(runner.mesh):
-        from sgl_jax.srt.kernels.deepseek_v4.projections import unpack_merged_weights
         from sgl_jax.srt.model_loader.deepseek_v4_native import original_fp4_scale_view
+        from sgl_jax.srt.model_loader.deepseek_v4_packing import unpack_merged_weights
 
         return [
             {
-                key: value
-                if key.startswith("experts.")
-                else jax.reshard(value, NamedSharding(runner.mesh, P()))
+                key: (
+                    value
+                    if key.startswith("experts.")
+                    else jax.reshard(value, NamedSharding(runner.mesh, P()))
+                )
                 for key, value in unpack_merged_weights(
                     original_fp4_scale_view(
                         layer, transposed=runner.model.moe_backend == "gmm_tuned"

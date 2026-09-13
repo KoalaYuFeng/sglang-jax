@@ -22,18 +22,18 @@ import jax
 import numpy as np
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
-from sgl_jax.srt.kernels.deepseek_v4.attention import attention
-from sgl_jax.srt.kernels.deepseek_v4.numerics import config_for_layer
+
+from benchmark.kernels.csa.bench_v4_compressor import memory_bytes, profile_call
 from sgl_jax.srt.layers.attention.deepseek_v4_paged_backend import (
     V4PagedBackend,
     V4PagedMetadata,
 )
+from sgl_jax.srt.layers.deepseek_v4.attention import attention
+from sgl_jax.srt.layers.deepseek_v4.numerics import config_for_layer
 from sgl_jax.srt.model_loader.deepseek_v4_checkpoint import DeepSeekV4Checkpoint
 from sgl_jax.srt.model_loader.deepseek_v4_native import load_layer
 from sgl_jax.test.kernels.csa_compressor_cases import read_arrays
 from sgl_jax.test.test_deepseek_v4_paged import make_batch
-
-from benchmark.kernels.csa.bench_v4_compressor import memory_bytes, profile_call
 
 HEAD_WEIGHTS = {
     "attn.wq_b.weight",

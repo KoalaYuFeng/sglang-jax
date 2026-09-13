@@ -35,19 +35,35 @@ def stage(row, *, isolated):
         return "inverse_rope_fp8_wo_a"
     if name.startswith(("v4_exact_rms_norm", "v4_exact_qnorm_rope")):
         return "v4_fused_normalization_and_rope"
-    if "gmm_checkpoint_fp8" in operation or "/deepseek_v4/fp8.py:" in source:
+    if "gmm_checkpoint_fp8" in operation or any(
+        path in source for path in ("/deepseek_v4/fp8.py:", "/kernels/low_bit/fp8.py:")
+    ):
         return "fp8_gmm_metadata_padding_and_glue"
     if "/deepseek_v4/normalization.py:" in source:
         return "v4_normalization_layout_and_helpers"
-    if "/deepseek_v4/projections.py:" in source:
+    if "norm" in native.source_functions(source, "linear"):
+        return "normalization"
+    if any(
+        path in source
+        for path in (
+            "/deepseek_v4/projections.py:",
+            "/deepseek_v4/projection_kernels.py:",
+            "/layers/deepseek_v4/linear.py:",
+        )
+    ):
         return "fp8_projection_layout_and_glue"
+    moe_functions = native.source_functions(source, "moe")
     moe = (
         isolated
+        or bool(
+            moe_functions & {"gmm_fp4_experts", "pack_routes", "grouped_fp4_experts"}
+        )
         or any(
             marker in source
             for marker in (
                 "/deepseek_v4/moe_gmm.py:",
                 "/kernels/low_bit/gmm.py:",
+                "/kernels/low_bit/fp4.py:",
                 "/kernels/gmm/",
             )
         )
@@ -72,9 +88,13 @@ def stage(row, *, isolated):
     if "/kernels/gmm/" in source and moe:
         return "moe_shared_gmm_metadata_and_zeroing"
     if moe:
-        if "DIAG_ROUTE_PACK_AND_GATHER" in operation or any(
-            15 <= int(line) <= 41
-            for line in re.findall(r"/deepseek_v4/moe_gmm.py:(\d+)", source)
+        if (
+            "pack_routes" in moe_functions
+            or "DIAG_ROUTE_PACK_AND_GATHER" in operation
+            or any(
+                15 <= int(line) <= 41
+                for line in re.findall(r"/deepseek_v4/moe_gmm.py:(\d+)", source)
+            )
         ):
             return "moe_route_pack_and_gather"
         if "DIAG_SWIGLU_AND_ROUTE_SCALE" in operation:

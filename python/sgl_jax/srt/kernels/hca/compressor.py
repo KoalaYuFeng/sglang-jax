@@ -802,7 +802,12 @@ def hca_state_pool_update_ragged_fused_pallas(
     return emitted, emit_mask, updated_pool
 
 
+# Emit from caller-selected compressor windows without taking ownership of a
+# serving request/state pool. Identical implementation, now an explicit API.
+hca_emit_selected_pallas = _hca_emit_selected_pallas
+
 __all__ = [
+    "hca_emit_selected_pallas",
     "hca_project_fused_pallas",
     "hca_state_pool_emit_pallas",
     "hca_state_pool_update_fused_pallas",

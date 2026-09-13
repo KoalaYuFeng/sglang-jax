@@ -18,21 +18,22 @@ from pathlib import Path
 import jax
 import numpy as np
 import profile_deepseek_v4_fp4_moe as diagnostic_module
-import sgl_jax.srt.kernels.low_bit.fp4_tuning as candidate_module
 from jax.experimental.layout import Format, Layout
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 from profile_deepseek_v4_fp4_moe import diagnostic_moe, route_geometry
 from run_deepseek_v4_framework import compare_arrays, framework_fingerprint
-from sgl_jax.srt.kernels.deepseek_v4.moe_gmm import gmm_fp4_experts
-from sgl_jax.srt.kernels.low_bit.fp4_tuning import (
-    CandidateCheckpointFP4Rhs,
+from validate_deepseek_v4_moe_gmm import captured_array, numpy_one_token
+
+import sgl_jax.srt.kernels.low_bit.fp4 as candidate_module
+from sgl_jax.srt.kernels.low_bit.fp4 import (
+    TiledCheckpointFP4Rhs,
     transpose_compact_scales,
 )
+from sgl_jax.srt.layers.deepseek_v4.moe import gmm_fp4_experts
 from sgl_jax.srt.model_executor.deepseek_v4_reference import source_fingerprint
 from sgl_jax.srt.model_loader.deepseek_v4_checkpoint import DeepSeekV4Checkpoint
 from sgl_jax.srt.model_loader.deepseek_v4_native import load_layer
-from validate_deepseek_v4_moe_gmm import captured_array, numpy_one_token
 
 
 def scale_copies(hlo):
@@ -240,9 +241,7 @@ def main():
                             )
                             jit_kwargs["in_shardings"] = tuple(v.format for v in values)
                         if name == "tuned_entry":
-                            from sgl_jax.srt.kernels.low_bit.fp4_tuning import (
-                                tuned_fp4_tile_m,
-                            )
+                            from sgl_jax.srt.kernels.low_bit.fp4 import tuned_fp4_tile_m
 
                             tile_m, tile_n = tuned_fp4_tile_m(tokens), 256
                             fn = lambda *v: gmm_fp4_experts(
@@ -257,7 +256,7 @@ def main():
                             )
                             if match is None:
                                 raise ValueError(f"unknown variant {name}")
-                            adapter = CandidateCheckpointFP4Rhs(
+                            adapter = TiledCheckpointFP4Rhs(
                                 transpose_scales=True,
                                 tile_m=int(match[1]),
                                 tile_n=int(match[2]),

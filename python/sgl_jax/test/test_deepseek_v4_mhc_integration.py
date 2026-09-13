@@ -8,8 +8,8 @@ import ml_dtypes
 import numpy as np
 import pytest
 
-from sgl_jax.srt.kernels.deepseek_v4.mhc import head_collapse, post, validate_backend
 from sgl_jax.srt.kernels.mhc import mhc_head_collapse_fused
+from sgl_jax.srt.layers.deepseek_v4.mhc import head_collapse, post, validate_backend
 
 
 def _bf16(value):

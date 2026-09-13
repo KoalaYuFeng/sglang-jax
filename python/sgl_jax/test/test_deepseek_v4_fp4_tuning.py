@@ -8,13 +8,14 @@ import pytest
 from jax.experimental import pallas as pl
 
 from sgl_jax.srt.kernels.gmm.megablox_gmm_kernel.gmm import gmm
-from sgl_jax.srt.kernels.low_bit.fp4_tuning import (
-    CandidateCheckpointFP4Rhs,
+from sgl_jax.srt.kernels.low_bit.formats import decode_e8m0
+from sgl_jax.srt.kernels.low_bit.fp4 import (
+    CheckpointFP4Rhs,
+    TiledCheckpointFP4Rhs,
     dequantize_packed_pairs,
+    grouped_fp4_matmul,
     transpose_compact_scales,
 )
-from sgl_jax.srt.kernels.low_bit.formats import decode_e8m0
-from sgl_jax.srt.kernels.low_bit.gmm import CheckpointFP4Rhs, grouped_fp4_matmul
 from sgl_jax.srt.kernels.low_bit.matmul import _expand_columns, _unpack_fp4_vmem
 from sgl_jax.test.kernels.test_deepseek_v4_low_bit import (
     _assert_close,
@@ -54,8 +55,11 @@ def test_transposed_scale_candidate_matches_original_and_numpy(
         group_offset=jnp.int32(1),
         preferred_element_type=jnp.bfloat16,
         tiling=(tile_m, hidden, tile_n),
-        rhs_adapter=CandidateCheckpointFP4Rhs(
-            transpose_scales=True, tile_m=tile_m, tile_n=tile_n, packed_scale=packed_scale
+        rhs_adapter=TiledCheckpointFP4Rhs(
+            transpose_scales=True,
+            tile_m=tile_m,
+            tile_n=tile_n,
+            packed_scale=packed_scale,
         ),
         interpret=jax.default_backend() != "tpu",
     )
@@ -68,7 +72,8 @@ def test_transposed_scale_candidate_matches_original_and_numpy(
         if 1 <= group < 5 and count:
             w, s = pairs[group - 1]
             expected[offset : offset + count] = _bf16(
-                _reference_activation(x[offset : offset + count]) @ _reference_weight(w, s, "fp4").T
+                _reference_activation(x[offset : offset + count])
+                @ _reference_weight(w, s, "fp4").T
             )
         offset += count
     _assert_close(actual, expected)
@@ -109,7 +114,7 @@ def test_packed_scale_dequant_all_fp4_codes_and_e8m0_exponents():
 
 
 def test_candidate_never_accepts_split_k_or_changes_baseline_tile_contract():
-    candidate = CandidateCheckpointFP4Rhs(tile_m=32, tile_n=256)
+    candidate = TiledCheckpointFP4Rhs(tile_m=32, tile_n=256)
     candidate.validate_tiling(tm=32, tk=4096, tn=256, k=4096)
     with pytest.raises(ValueError, match="full-K"):
         candidate.validate_tiling(tm=32, tk=2048, tn=256, k=4096)

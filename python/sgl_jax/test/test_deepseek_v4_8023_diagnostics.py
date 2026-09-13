@@ -9,14 +9,18 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from sgl_jax.srt.kernels.deepseek_v4.numerics import V4LayerConfig
 from sgl_jax.srt.layers.attention.deepseek_v4_paged_backend import V4PagedMetadata
+from sgl_jax.srt.layers.deepseek_v4.numerics import V4LayerConfig
 
 SCRIPTS = str(Path(__file__).resolve().parents[3] / "scripts")
 with patch.object(sys, "path", [SCRIPTS, *sys.path]):
     import replay_deepseek_v4_8023 as replay
     from debug_deepseek_v4_8023 import load_arrays, save_arrays
-    from replay_deepseek_v4_8023 import logical_attention_indices, logical_cache, request_trace
+    from replay_deepseek_v4_8023 import (
+        logical_attention_indices,
+        logical_cache,
+        request_trace,
+    )
 
 
 @pytest.mark.parametrize("compressed", [True, False])

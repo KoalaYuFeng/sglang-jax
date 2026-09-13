@@ -19,6 +19,8 @@ import jax
 import numpy as np
 import psutil
 
+from deepseek_v4_source import framework_fingerprint
+
 from sgl_jax.srt.configs.model_config import ModelConfig
 from sgl_jax.srt.layers.logits_processor import LogitsMetadata
 from sgl_jax.srt.managers.schedule_batch import ModelWorkerSamplingInfo
@@ -30,47 +32,6 @@ from sgl_jax.srt.model_executor.deepseek_v4_reference import (
 from sgl_jax.srt.model_executor.forward_batch_info import ForwardMode
 from sgl_jax.srt.server_args import ServerArgs
 from sgl_jax.srt.utils.mesh_utils import create_device_mesh
-
-
-def framework_fingerprint():
-    root = Path(__file__).resolve().parents[1]
-    digest = hashlib.sha256(source_fingerprint().encode())
-    paths = [
-        "configs/deepseek_v4.py",
-        "configs/model_config.py",
-        "hf_transformers_utils.py",
-        "models/deepseek_v4.py",
-        "model_loader/deepseek_v4_native.py",
-        "layers/attention/deepseek_v4_backend.py",
-        "layers/attention/deepseek_v4_paged_backend.py",
-        "mem_cache/deepseek_v4_pool.py",
-        "mem_cache/deepseek_v4_paged_pool.py",
-        "model_executor/model_runner.py",
-        "model_executor/model_runner_kv_cache_mixin.py",
-        "model_executor/compilation_manager.py",
-        "kernels/gmm/routing.py",
-        "kernels/gmm/megablox_gmm_kernel/gmm.py",
-        "kernels/gmm/megablox_gmm_kernel/common.py",
-        "kernels/gmm/megablox_gmm_kernel/tuned_block_sizes.py",
-    ]
-    paths.extend(
-        str(p.relative_to(root / "python/sgl_jax/srt"))
-        for p in sorted((root / "python/sgl_jax/srt/kernels/deepseek_v4").glob("*.py"))
-    )
-    paths.extend(
-        str(p.relative_to(root / "python/sgl_jax/srt"))
-        for p in sorted((root / "python/sgl_jax/srt/kernels/hca").glob("*.py"))
-    )
-    paths.extend(
-        str(p.relative_to(root / "python/sgl_jax/srt"))
-        for p in sorted((root / "python/sgl_jax/srt/kernels/csa").glob("*.py"))
-    )
-    paths.append("kernels/dsa/streamindex_topk.py")
-    for name in paths:
-        digest.update(
-            name.encode() + b"\0" + (root / "python/sgl_jax/srt" / name).read_bytes()
-        )
-    return digest.hexdigest()
 
 
 def server_args(checkpoint, *, inspect_only=False):

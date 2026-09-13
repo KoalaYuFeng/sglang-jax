@@ -53,9 +53,10 @@ def test_same_total_call_count_cannot_hide_a_missing_layer():
         compiled_moe_evidence(text, layers=2)
 
 
-def test_tuned_backend_requires_its_actual_adapter_on_every_projection():
+@pytest.mark.parametrize("adapter", ["candidate", "tiled"])
+def test_tuned_backend_requires_its_actual_adapter_on_every_projection(adapter):
     text = fixture().replace(
-        "gmm_checkpoint_fp4-", "gmm_checkpoint_fp4_candidate_scale_kn_packed_scale-"
+        "gmm_checkpoint_fp4-", f"gmm_checkpoint_fp4_{adapter}_scale_kn_packed_scale-"
     )
     result = compiled_moe_evidence(text, layers=2, backend="gmm_tuned")
     assert result["backend"] == "gmm_tuned"
@@ -66,7 +67,7 @@ def test_tuned_backend_requires_its_actual_adapter_on_every_projection():
     with pytest.raises(AssertionError):
         compiled_moe_evidence(fixture(), layers=2, backend="gmm_tuned")
     mixed = text.replace(
-        "gmm_checkpoint_fp4_candidate_scale_kn_packed_scale-", "gmm_checkpoint_fp4-", 1
+        f"gmm_checkpoint_fp4_{adapter}_scale_kn_packed_scale-", "gmm_checkpoint_fp4-", 1
     )
     with pytest.raises(AssertionError):
         compiled_moe_evidence(mixed, layers=2, backend="gmm_tuned")

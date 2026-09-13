@@ -11,18 +11,16 @@ from pathlib import Path
 import jax
 import jax.numpy as jnp
 import numpy as np
-from jax.sharding import NamedSharding, PartitionSpec as P
-
 from debug_deepseek_v4_8023 import save_arrays
+from jax.sharding import NamedSharding
+from jax.sharding import PartitionSpec as P
 from replay_deepseek_v4_8023 import difference, logical_cache, traced_step
 from run_deepseek_v4_8k_native import CAPACITY, CONTEXT, PROMPT
 from run_deepseek_v4_framework import framework_fingerprint
 from run_deepseek_v4_paged import ModelWorker, PagedWorkerSession, server_args
-from sgl_jax.srt.kernels.deepseek_v4.mhc import head_collapse
-from sgl_jax.srt.kernels.deepseek_v4.numerics import (
-    config_for_layer,
-    rms_norm,
-)
+
+from sgl_jax.srt.layers.deepseek_v4.mhc import head_collapse
+from sgl_jax.srt.layers.deepseek_v4.numerics import config_for_layer, rms_norm
 from sgl_jax.srt.model_executor.deepseek_v4_reference import DeepSeekV4Reference
 from sgl_jax.srt.model_loader.deepseek_v4_native import weight_specs
 from sgl_jax.srt.utils.mesh_utils import create_device_mesh

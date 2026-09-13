@@ -14,8 +14,8 @@ import jax.numpy as jnp
 import ml_dtypes
 import numpy as np
 
-from sgl_jax.srt.kernels.deepseek_v4.compressor import _project
 from sgl_jax.srt.layers.attention.deepseek_v4_paged_backend import V4PagedBackend
+from sgl_jax.srt.layers.deepseek_v4.compressor import _project
 from sgl_jax.test.test_deepseek_v4_paged import make_batch
 
 

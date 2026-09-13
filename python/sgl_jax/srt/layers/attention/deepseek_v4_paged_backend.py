@@ -5,7 +5,8 @@ from dataclasses import dataclass, fields
 import jax
 import numpy as np
 from flax import nnx
-from jax.sharding import NamedSharding, PartitionSpec as P
+from jax.sharding import NamedSharding
+from jax.sharding import PartitionSpec as P
 from jax.tree_util import register_pytree_node_class
 
 from sgl_jax.srt.layers.attention.base_attn_backend import (
@@ -194,6 +195,8 @@ class V4PagedBackend(AttentionBackend):
         return metadata
 
     def __call__(self, x, positions, weights, cache, config, locations):
-        from sgl_jax.srt.kernels.deepseek_v4.attention import attention
+        from sgl_jax.srt.layers.deepseek_v4.attention import attention
 
-        return attention(x, positions, weights, cache, config, self.forward_metadata, locations)
+        return attention(
+            x, positions, weights, cache, config, self.forward_metadata, locations
+        )

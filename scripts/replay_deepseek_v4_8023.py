@@ -16,22 +16,20 @@ from unittest.mock import patch
 import jax
 import jax.numpy as jnp
 import numpy as np
-from jax.sharding import NamedSharding, PartitionSpec as P
-
 from debug_deepseek_v4_8023 import load_arrays, save_arrays
 from debug_deepseek_v4_native_layers import native_step
+from jax.sharding import NamedSharding
+from jax.sharding import PartitionSpec as P
 from run_deepseek_v4_framework import compare_arrays, framework_fingerprint
-from sgl_jax.srt.kernels.deepseek_v4.mhc import head_collapse
-from sgl_jax.srt.kernels.deepseek_v4.numerics import (
-    config_for_layer,
-    rms_norm,
-)
+
 from sgl_jax.srt.layers.attention.deepseek_v4_paged_backend import V4PagedMetadata
+from sgl_jax.srt.layers.deepseek_v4.mhc import head_collapse
+from sgl_jax.srt.layers.deepseek_v4.numerics import config_for_layer, rms_norm
 from sgl_jax.srt.model_loader.deepseek_v4_checkpoint import DeepSeekV4Checkpoint
 from sgl_jax.srt.model_loader.deepseek_v4_native import load_layer, weight_specs
 from sgl_jax.srt.utils.mesh_utils import create_device_mesh
 
-ATTENTION = importlib.import_module("sgl_jax.srt.kernels.deepseek_v4.attention")
+ATTENTION = importlib.import_module("sgl_jax.srt.layers.deepseek_v4.attention")
 COMPRESS = ATTENTION.compress
 
 

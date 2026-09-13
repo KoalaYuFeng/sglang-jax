@@ -7,13 +7,15 @@ Pre/Sinkhorn already call the original Pallas kernels directly in the model.
 
 import jax
 
-from sgl_jax.srt.kernels.deepseek_v4.numerics import official_head_collapse
 from sgl_jax.srt.kernels.mhc import mhc_head_collapse_fused, mhc_post_fused
+from sgl_jax.srt.layers.deepseek_v4.numerics import official_head_collapse
 
 
 def validate_backend(backend):
     if backend not in ("pallas", "reference"):
-        raise ValueError("v4_mhc_backend must be 'pallas' or 'reference'; no automatic fallback")
+        raise ValueError(
+            "v4_mhc_backend must be 'pallas' or 'reference'; no automatic fallback"
+        )
     return backend
 
 

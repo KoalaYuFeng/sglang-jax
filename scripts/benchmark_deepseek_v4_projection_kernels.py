@@ -19,9 +19,12 @@ import numpy as np
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 from run_deepseek_v4_framework import framework_fingerprint
-from sgl_jax.srt.kernels.deepseek_v4 import normalization, numerics, projections
-from sgl_jax.srt.kernels.deepseek_v4.fp8 import fp8_linear
+
+from sgl_jax.srt.kernels.deepseek_v4 import normalization, projection_kernels
+from sgl_jax.srt.kernels.low_bit.fp8 import fp8_linear
 from sgl_jax.srt.kernels.low_bit.matmul import low_bit_matmul
+from sgl_jax.srt.layers.deepseek_v4 import numerics
+from sgl_jax.srt.model_loader import deepseek_v4_packing as projection_packing
 from sgl_jax.srt.model_loader.deepseek_v4_checkpoint import DeepSeekV4Checkpoint
 
 
@@ -243,7 +246,7 @@ def main():
 
                         def fused_wo(x, w, s, p, *, tile=tile):
                             phase = numerics.rope_angles(p, config)
-                            return projections.inverse_rope_fp8_wo_a(
+                            return projection_kernels.inverse_rope_fp8_wo_a(
                                 x,
                                 w,
                                 s,
@@ -260,7 +263,10 @@ def main():
                             (x, w, s, positions),
                         )
                 if "merged" in args.kinds:
-                    for target, sources in projections.MERGED_PROJECTIONS.items():
+                    for (
+                        target,
+                        sources,
+                    ) in projection_packing.MERGED_PROJECTIONS.items():
                         parts = [
                             checkpoint.load_linear("layers.2." + source)
                             for source in sources

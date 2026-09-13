@@ -9,17 +9,17 @@ from unittest.mock import patch
 import jax
 import jax.experimental.pallas as pl
 import jax.numpy as jnp
-from jax.experimental.pallas import tpu as pltpu
-
 from debug_deepseek_v4_8023 import load_arrays, save_arrays
+from jax.experimental.pallas import tpu as pltpu
 from run_deepseek_v4_framework import compare_arrays, framework_fingerprint
-from sgl_jax.srt.kernels.deepseek_v4 import hca
-from sgl_jax.srt.kernels.deepseek_v4.numerics import (
+
+from sgl_jax.srt.kernels.low_bit.formats import activation_fp8_roundtrip, round_bf16
+from sgl_jax.srt.layers.deepseek_v4 import hca
+from sgl_jax.srt.layers.deepseek_v4.numerics import (
     _fixed_tree_mean_last,
     config_for_layer,
     rope_angles,
 )
-from sgl_jax.srt.kernels.low_bit.formats import activation_fp8_roundtrip, round_bf16
 from sgl_jax.srt.model_loader.deepseek_v4_checkpoint import DeepSeekV4Checkpoint
 
 COMP = importlib.import_module("sgl_jax.srt.kernels.hca.compressor")
@@ -39,9 +39,13 @@ def main():
     config = config_for_layer(checkpoint.config, args.layer, 8192)
     fixture = load_arrays(args.fixture / "first-compressed")
     v, s, p = (jnp.asarray(fixture[key]) for key in ("values", "scores", "starts"))
-    norm = jnp.asarray(checkpoint.read_tensor(f"layers.{args.layer}.attn.compressor.norm.weight"))
+    norm = jnp.asarray(
+        checkpoint.read_tensor(f"layers.{args.layer}.attn.compressor.norm.weight")
+    )
     quantize = jax.jit(
-        lambda x: jnp.concatenate((activation_fp8_roundtrip(x[:, :-64], 64), x[:, -64:]), axis=1)
+        lambda x: jnp.concatenate(
+            (activation_fp8_roundtrip(x[:, :-64], 64), x[:, -64:]), axis=1
+        )
     )
 
     @jax.jit
@@ -158,7 +162,9 @@ def main():
         with (
             patch.object(pl, "pallas_call", instrument),
             patch.object(
-                hca, "_hca_emit_selected_pallas", COMP._hca_emit_selected_pallas.__wrapped__
+                hca,
+                "hca_emit_selected_pallas",
+                COMP._hca_emit_selected_pallas.__wrapped__,
             ),
         ):
             result = hca.emit(v, s, n, p, jnp.ones(p.shape, jnp.bool_), config)
@@ -179,8 +185,12 @@ def main():
         "source_fingerprint": framework_fingerprint(),
         "fixture": str(args.fixture),
         "reference_faithful": compare_arrays(fixture["reference"], quantize(expected)),
-        "original_faithful": compare_arrays(fixture["original"], quantize(uninstrumented)),
-        "repaired_vs_reference": compare_arrays(fixture["reference"], quantize(uninstrumented)),
+        "original_faithful": compare_arrays(
+            fixture["original"], quantize(uninstrumented)
+        ),
+        "repaired_vs_reference": compare_arrays(
+            fixture["reference"], quantize(uninstrumented)
+        ),
         "instrumented_faithful": compare_arrays(uninstrumented, actual),
         "probability": compare_arrays(ref_probability, probability[: len(v)]),
         "exponent": compare_arrays(ref_exponent, exponent[: len(v)]),
@@ -192,12 +202,16 @@ def main():
     if args.previous:
         previous = load_arrays(args.previous / "stages")
         report["previous_faithful"] = {
-            "reference_stages": compare_arrays(previous["reference"], ref_stages[:, :6]),
+            "reference_stages": compare_arrays(
+                previous["reference"], ref_stages[:, :6]
+            ),
             "pallas_stages": compare_arrays(previous["pallas"], stages[:, :6]),
             "reference_probability": compare_arrays(
                 previous["reference_probability"], ref_probability
             ),
-            "pallas_probability": compare_arrays(previous["pallas_probability"], probability),
+            "pallas_probability": compare_arrays(
+                previous["pallas_probability"], probability
+            ),
         }
     save_arrays(
         args.output / "stages",
@@ -224,7 +238,9 @@ def main():
             "instrumented_faithful",
         )
     ):
-        raise AssertionError("emitter diagnostic does not reproduce the immutable real outputs")
+        raise AssertionError(
+            "emitter diagnostic does not reproduce the immutable real outputs"
+        )
     if args.previous and any(
         not m["bitwise_equal"]
         for name, m in report["previous_faithful"].items()

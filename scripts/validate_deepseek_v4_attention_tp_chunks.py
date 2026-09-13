@@ -28,11 +28,12 @@ from benchmark_deepseek_v4_attention_tp import (
     read_all,
 )
 from jax.sharding import Mesh
-from sgl_jax.srt.kernels.deepseek_v4.numerics import config_for_layer
+
 from sgl_jax.srt.layers.attention.deepseek_v4_paged_backend import (
     V4PagedBackend,
     V4PagedMetadata,
 )
+from sgl_jax.srt.layers.deepseek_v4.numerics import config_for_layer
 from sgl_jax.srt.mem_cache.deepseek_v4_paged_pool import layer_buffer_specs
 from sgl_jax.srt.model_executor.forward_batch_info import ForwardMode
 from sgl_jax.srt.model_loader.deepseek_v4_checkpoint import DeepSeekV4Checkpoint

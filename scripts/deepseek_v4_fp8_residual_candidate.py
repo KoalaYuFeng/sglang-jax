@@ -4,8 +4,9 @@ from dataclasses import dataclass
 
 import jax
 import jax.numpy as jnp
-from sgl_jax.srt.kernels.deepseek_v4.fp8 import CheckpointFP8Rhs, decode_weight_tile
+
 from sgl_jax.srt.kernels.low_bit.formats import activation_fp8_roundtrip
+from sgl_jax.srt.kernels.low_bit.fp8 import CheckpointFP8Rhs, decode_weight_tile
 
 
 def bf16_rounding_carrier(high, low):

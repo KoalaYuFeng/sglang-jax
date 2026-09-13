@@ -5,19 +5,41 @@ experiment settings and results. The historical reports linked below retain
 their original stage, source identity, failures and acceptance scope; their
 older uses of "current" do not supersede this ledger.
 
+## Source-organization refactor — 2026-09-12
+
+The [kernel/model-adaptation refactor](deepseek_v4_refactor_20260912.md) and
+[PR cleanup](deepseek_v4_pr_cleanup_20260912.md) separate model composition and
+request state from tensor kernels. The cleanup migrates in-repo consumers,
+removes temporary compatibility imports, combines Linear/MoE/FP4 modules and
+moves the old B1 backend into test support. These changes alter source
+fingerprints, not intended arithmetic or defaults.
+The final follow-up also centralizes execution-option validation and the
+runtime/profile fingerprint manifest, with a separate diagnostic archive
+index. Local CPU checks report 454 passed, 101 skipped and the same known
+two-value QNorm failure; see the cleanup report for scope and receipts.
+The measured accuracy/performance results below remain tied to their original
+source snapshots. A subsequent [four-case v5p source A/B](deepseek_v4_refactor_ab_20260912.md)
+completed: captured logits and generation match exactly, logical state hashes
+match, TTFT differs by less than 0.1%, TPOT by less than 0.6%, and measured HBM
+snapshots match. This is a bounded ModelWorker refactor check, not a new full
+public-accuracy or Engine/HTTP stress result.
+
 ## Published result index
 
 | Record | Status / scope |
 | --- | --- |
+| [Refactor TPU A/B](deepseek_v4_refactor_ab_20260912.md) | Same-node 43-layer check, four cases through 8064-token B1; exact captured logits and state hashes, matched HBM, warm timing changes below 1% |
 | [Full accuracy and official Instruct comparison](deepseek_v4_full_benchmarks_20260911.md) | GPQA Diamond 72.22%, GSM8K 97.04%, HumanEval 90.85%; all named test splits complete |
 | [Same-runtime HTTP performance](deepseek_v4_v5p_release_20260911.md#performance-provenance) | 128/1024 input tokens, 32 output tokens, concurrency 1/4; measured finite batches, not sustained stress |
 | [Historical 4K/8K performance and HBM](deepseek_v4_8320_validation_profile.md) | Older ModelWorker runtime; not current-source HTTP performance |
 | [Cancelled MMLU-Pro](deepseek_v4_mmlu_full_20260911.md) | Incomplete; no full-test score. LiveCodeBench has not been run |
 
-September 12 cleanup is limited to evaluation-code formatting and documentation.
+The earlier September 12 publication cleanup was limited to evaluation-code
+formatting and documentation, before the source refactor described above.
 The measured evaluator snapshot remains commit `7c0c671`; frozen evidence hashes
-must be checked against that snapshot, not reformatted files. Runtime kernels,
-weight handling and core scheduling are unchanged. No new long benchmark is
+must be checked against that snapshot, not reformatted files. That publication
+cleanup did not change runtime kernels, weight handling or core scheduling.
+No new long benchmark is
 scheduled as part of publication.
 
 ## Latest numerical and task-accuracy baseline — 2026-09-11
