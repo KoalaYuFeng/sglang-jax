@@ -268,6 +268,7 @@ suites = {
         TestFile("python/sgl_jax/test/test_flashattention_mha.py", 11, runner="pytest"),
         TestFile("python/sgl_jax/test/test_flashattention_gqa.py", 11, runner="pytest"),
         TestFile("python/sgl_jax/test/test_flashattention_misc.py", 7, runner="pytest"),
+        TestFile("python/sgl_jax/test/test_rpa_v3_kv_writeback.py", 1, runner="pytest"),
         TestFile("python/sgl_jax/test/test_mla_attention.py", 2.5),
         TestFile("test/srt/kernels/hca/test_backend.py", 15, runner="pytest"),
         TestFile("python/sgl_jax/test/test_moe_topk.py", 0.3),
@@ -312,6 +313,11 @@ suites = {
             runner="pytest",
         ),
         TestFile(
+            "python/sgl_jax/test/test_verify_mask_packing.py",
+            0.1,
+            runner="pytest",
+        ),
+        TestFile(
             "python/sgl_jax/test/multimodal/test_qwen_vl_processor.py",
             0.1,
             runner="pytest",
@@ -319,6 +325,11 @@ suites = {
         TestFile("python/sgl_jax/test/multimodal/test_rotary_embedding.py", 0.1),
         TestFile("test/srt/test_radix_input_ids.py", 0.1, runner="pytest"),
         TestFile("test/srt/test_tokenizer_manager_event.py", 0.1),
+        TestFile(
+            "python/sgl_jax/test/mem_cache/test_unified_swa_scheduler.py",
+            0.2,
+            runner="pytest",
+        ),
         TestFile("test/srt/disaggregation/test_pd_auth.py", 0.3, runner="pytest"),
         TestFile("test/srt/disaggregation/test_pd_bootstrap.py", 0.5, runner="pytest"),
         TestFile("test/srt/disaggregation/test_pd_decode.py", 0.5, runner="pytest"),
@@ -416,6 +427,7 @@ suites = {
         TestFile("python/sgl_jax/test/mem_cache/test_swa_radix_cache.py", 1),
         TestFile("python/sgl_jax/test/mem_cache/test_radix_cache.py", 1),
         TestFile("python/sgl_jax/test/mem_cache/test_unified_radix_cache.py", 1),
+        TestFile("python/sgl_jax/test/mem_cache/test_unified_swa_component.py", 1),
         TestFile("python/sgl_jax/test/mem_cache/test_unified_radix_tree_flag.py", 1),
         TestFile("python/sgl_jax/test/mem_cache/test_paged_allocator_multi_dp.py", 1),
         TestFile("python/sgl_jax/test/mem_cache/test_host_kv_pool.py", 1, runner="pytest"),
@@ -474,6 +486,11 @@ suites = {
         TestFile(
             "python/sgl_jax/test/layers/test_lightning_backend_dp.py",
             1,
+            runner="pytest",
+        ),
+        TestFile(
+            "python/sgl_jax/test/test_flashattention_custom_mask_dp.py",
+            2,
             runner="pytest",
         ),
         TestFile("python/sgl_jax/test/test_kda_attention.py", 6.5),
