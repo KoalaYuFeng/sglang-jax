@@ -88,6 +88,10 @@ class ForwardMode(IntEnum):
     def is_target_verify(self):
         return self == ForwardMode.TARGET_VERIFY
 
+    def is_spec_extend(self):
+        """Extend-shaped speculative batch (TARGET_VERIFY or DRAFT_EXTEND)."""
+        return self == ForwardMode.TARGET_VERIFY or self == ForwardMode.DRAFT_EXTEND
+
     def is_draft_extend(self):
         return self == ForwardMode.DRAFT_EXTEND
 
@@ -212,9 +216,6 @@ class ForwardBatch:
     recurrent_track_indices: jax.Array | None = None
     recurrent_track_mask: jax.Array | None = None
 
-    # Host-only multimodal batch consumed before the backbone JIT.
-    multimodal_batch: object | None = None
-
     def tree_flatten(self):
         children = (
             self.input_ids,
@@ -291,10 +292,6 @@ class ForwardBatch:
         obj.recurrent_cow_src_indices = children[20]
         obj.recurrent_track_indices = children[21]
         obj.recurrent_track_mask = children[22]
-        # Host-only attribute, never a pytree child; reset so attribute access on
-        # an unflattened ForwardBatch never raises (the routine that consumes it
-        # runs on the original, pre-jit ForwardBatch).
-        obj.multimodal_batch = None
         return obj
 
     def __repr__(self) -> str:
@@ -471,8 +468,6 @@ class ForwardBatch:
                 sharding=NamedSharding(model_runner.mesh, PartitionSpec("data")),
             )
 
-        multimodal_batch = getattr(batch, "multimodal_batch", None)
-
         obj = cls(
             bid=batch.bid,
             forward_mode=batch.forward_mode,
@@ -503,7 +498,6 @@ class ForwardBatch:
             recurrent_track_indices=recurrent_track_indices,
             recurrent_track_mask=recurrent_track_mask,
         )
-        obj.multimodal_batch = multimodal_batch
 
         # Auto-generate attention mask for Encoder-only models (e.g. UMT5Encoder, BERT)
         is_embedding = getattr(model_runner.model_config, "is_embedding", False)

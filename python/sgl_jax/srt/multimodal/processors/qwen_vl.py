@@ -1,11 +1,10 @@
-import asyncio
-import base64
 import logging
 import math
 import os
 import tempfile
 
 import numpy as np
+import pybase64
 from PIL import Image
 
 from sgl_jax.srt.multimodal.common.modality_enum import (
@@ -41,10 +40,14 @@ FPS_MAX_FRAMES = 768
 _QWEN3VL_ARCHITECTURES = frozenset(
     {
         "Qwen3VLForConditionalGeneration",
+        "Qwen3_5ForConditionalGeneration",
+        "Qwen3_5MoeForConditionalGeneration",
     }
 )
 
 
+# Video preprocessing adapted from SGLang:
+# https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/multimodal/processors/qwen_vl.py
 def smart_resize(
     height: int,
     width: int,
@@ -175,9 +178,17 @@ def _write_temp_video(payload: bytes) -> str:
         return tmp.name
 
 
-def preprocess_video(source, video_config: dict) -> np.ndarray:
+def preprocess_video(source, video_config: dict) -> tuple[np.ndarray, dict]:
     if isinstance(source, np.ndarray):
-        return _resize_video_frames(source, video_config)
+        # Frame arrays are already sampled; fps describes their playback rate.
+        video_fps = video_config.get("fps", FPS)
+        total_frames = len(source)
+        return _resize_video_frames(source, video_config), {
+            "fps": video_fps,
+            "duration": total_frames / video_fps,
+            "total_num_frames": total_frames,
+            "frames_indices": list(range(total_frames)),
+        }
     from decord import VideoReader, cpu
 
     tmp_path = None
@@ -194,10 +205,10 @@ def preprocess_video(source, video_config: dict) -> np.ndarray:
                 vr = VideoReader(tmp_path, ctx=ctx)
             elif source.startswith("data:") and "base64," in source:
                 payload = source.split("base64,", 1)[1]
-                tmp_path = _write_temp_video(base64.b64decode(payload))
+                tmp_path = _write_temp_video(pybase64.b64decode(payload))
                 vr = VideoReader(tmp_path, ctx=ctx)
             else:
-                tmp_path = _write_temp_video(base64.b64decode(source, validate=True))
+                tmp_path = _write_temp_video(pybase64.b64decode(source, validate=True))
                 vr = VideoReader(tmp_path, ctx=ctx)
         else:
             raise ValueError(f"Unsupported video input type: {type(source)}")
@@ -216,7 +227,13 @@ def preprocess_video(source, video_config: dict) -> np.ndarray:
             len(frame_indices),
         )
         video = vr.get_batch(frame_indices).asnumpy()
-        return _resize_video_frames(video, video_config)
+        return _resize_video_frames(video, video_config), {
+            "fps": video_fps,
+            "duration": total_frames / video_fps,
+            "total_num_frames": total_frames,
+            "frames_indices": frame_indices.tolist(),
+            "video_backend": "decord",
+        }
     finally:
         if tmp_path and os.path.exists(tmp_path):
             os.unlink(tmp_path)
@@ -229,6 +246,8 @@ class QwenVLProcessor(BaseMultimodalProcessor):
         "Qwen2VLForConditionalGeneration",
         "Qwen2_5_VLForConditionalGeneration",
         "Qwen3VLForConditionalGeneration",
+        "Qwen3_5ForConditionalGeneration",
+        "Qwen3_5MoeForConditionalGeneration",
     )
 
     async def process_mm_data_async(
@@ -250,10 +269,29 @@ class QwenVLProcessor(BaseMultimodalProcessor):
         image_sources = self.normalize_data(image_data)
         video_data = self.normalize_data(getattr(request_obj, "video_data", None))
         video_config = self._build_video_config(request_obj)
-        images, videos = await asyncio.gather(
-            self.load_images_async(image_sources),
-            self._load_videos_async(video_data, video_config),
+        return await self.mm_processor_executor.run(
+            self._process_mm_data,
+            input_text,
+            image_sources,
+            video_data,
+            video_config,
         )
+
+    def _process_mm_data(
+        self,
+        input_text,
+        image_sources,
+        video_data,
+        video_config,
+        *,
+        processor,
+    ) -> MultimodalInputs:
+        images = [self.load_image(source) for source in image_sources]
+        videos, video_metadata = [], []
+        for source in video_data:
+            video, metadata = preprocess_video(self.unwrap_source(source), video_config)
+            videos.append(video)
+            video_metadata.append(metadata)
         processor_kwargs = {}
         if videos:
             processor_kwargs["videos_kwargs"] = {
@@ -263,11 +301,16 @@ class QwenVLProcessor(BaseMultimodalProcessor):
         uses_qwen3vl_processor = not _QWEN3VL_ARCHITECTURES.isdisjoint(self.hf_config.architectures)
         if uses_qwen3vl_processor:
             processor_kwargs["return_mm_token_type_ids"] = True
+            if videos:
+                # Match SGLang: timestamps use source FPS and sampled indices.
+                processor_kwargs["video_metadata"] = video_metadata
+                processor_kwargs["videos_kwargs"] = {"do_sample_frames": False}
 
-        return await self.process_and_combine_mm_data_async(
+        return self.process_and_combine_mm_data(
             input_text,
             images=images,
             videos=videos,
+            processor=processor,
             **processor_kwargs,
         )
 
@@ -504,14 +547,6 @@ class QwenVLProcessor(BaseMultimodalProcessor):
             raise ValueError("Qwen3-VL has unmatched vision token groups.")
         return result
 
-    async def _load_videos_async(self, video_data, video_config):
-        return await asyncio.gather(
-            *(
-                self._run_io_async(preprocess_video, self.unwrap_source(item), video_config)
-                for item in video_data
-            )
-        )
-
     def _build_video_config(self, request_obj):
         vision_config = self.hf_config.vision_config
         video_config = {"factor": int(vision_config.patch_size * vision_config.spatial_merge_size)}
@@ -522,12 +557,6 @@ class QwenVLProcessor(BaseMultimodalProcessor):
         if nframes is not None and "fps" not in video_config:
             video_config["nframes"] = nframes
         return video_config
-
-    @classmethod
-    def _to_grid_list(cls, value):
-        if value is None:
-            return None
-        return [tuple(int(item) for item in row) for row in cls._to_numpy(value).tolist()]
 
     @classmethod
     def _to_list(cls, value):

@@ -34,6 +34,20 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
+# Draft architectures whose draft worker holds exactly ONE decoder layer: the NextN /
+# MTP heads (``*ForCausalLMNextN``, ``MiMoMTPForCausalLM``, ``MiMoV2MTPForCausalLM``,
+# ``Qwen3NextForCausalLMMTP``). Multi-layer MTP models (MiMo-V2-Flash) instantiate one
+# worker per layer, so the per-worker count is still 1. Everything else (DFlash,
+# Eagle3) sizes its KV pool from its own ``num_hidden_layers``.
+_SINGLE_LAYER_DRAFT_SUFFIXES = ("NextN", "MTPForCausalLM", "ForCausalLMMTP")
+
+
+def is_single_layer_draft_arch(hf_config) -> bool:
+    archs = getattr(hf_config, "architectures", None) or []
+    arch = archs[0] if archs else ""
+    return arch.endswith(_SINGLE_LAYER_DRAFT_SUFFIXES)
+
+
 def _compute_recurrent_per_req_bytes(
     num_layers: int,
     num_heads: int,
@@ -117,6 +131,8 @@ def _per_req_state_bytes_from_config(cfg, tp_size: int) -> int:
 
 def _enforce_recurrent_state_server_constraints(server_args, is_lightning: bool = False) -> None:
     """Assert server constraints for hybrid recurrent state models."""
+    if server_args.attention_backend == "tt" and server_args.enable_mixed_chunk:
+        raise ValueError("TT recurrent attention does not support --enable-mixed-chunk")
     if server_args.enable_recurrent_extra_buffer:
         # GLA/Lightning decode is a fused Pallas kernel that cannot add a masked
         # recurrent track scatter, so the extra-buffer path is unsupported. Reject
@@ -284,6 +300,13 @@ def _build_hybrid_pools(
 
 def _build_non_hybrid_memory_pools(token_to_kv_pool) -> MemoryPools:
     """Wrap a single KV pool in MemoryPools."""
+    from sgl_jax.srt.mem_cache.memory_pool import MSAIndexKProxy, MSATokenToKVPool
+
+    if isinstance(token_to_kv_pool, MSATokenToKVPool):
+        return MemoryPools(
+            token_to_kv_pool=token_to_kv_pool,
+            msa_index_k=MSAIndexKProxy(token_to_kv_pool),
+        )
     return MemoryPools(token_to_kv_pool=token_to_kv_pool)
 
 
@@ -364,13 +387,18 @@ class ModelRunnerKVCacheMixin:
             )
             return int(full_cost + swa_cost)
 
-        return (
+        main_kv = (
             self.model_config.get_num_kv_heads(self.attention_tp_size)
             * align128(self.model_config.head_dim)
             * 2
             * num_layers
             * dtype_size
         )
+        # Backends may keep extra per-token cache (e.g. MSA index_k, not tensor-sharded).
+        extra = getattr(self.attn_backend, "extra_kv_bytes_per_token", None)
+        if extra is not None:
+            main_kv += extra(dtype_size)
+        return main_kv
 
     def _profile_available_bytes(self: ModelRunner, total_device_memory: int) -> int:
         """Profile available bytes for KV cache (+ recurrent state)."""
@@ -458,6 +486,21 @@ class ModelRunnerKVCacheMixin:
         available_kv_cache_bytes = self._profile_available_bytes(total_device_memory)
 
         cell_size = self._compute_cell_size()
+
+        # Accommodate Draft KV Cache Memory Footprint + Spec Headroom
+        if (
+            not self.is_draft_worker
+            and self.spec_algorithm is not None
+            and not self.spec_algorithm.is_none()
+        ):
+            # Reserve 2 GB entirely for the Draft Worker's KV buffer and XLA fragmentation.
+            overhead_bytes = 1 * 1024 * 1024 * 1024
+            logger.info(
+                "Deducting %d bytes from available KV cache for draft memory overhead",
+                overhead_bytes,
+            )
+            available_kv_cache_bytes -= overhead_bytes
+
         max_tokens = max(1, int(available_kv_cache_bytes // cell_size))
 
         logger.info(
@@ -503,10 +546,27 @@ class ModelRunnerKVCacheMixin:
             token_capacity = min(token_capacity, max_total_tokens)
 
         # Page alignment
-        token_capacity = token_capacity // self.server_args.page_size * self.server_args.page_size
+        token_capacity = (token_capacity // self.server_args.page_size) * self.server_args.page_size
 
         # DP scale
         token_capacity = token_capacity * dp_size
+
+        # Data mesh sharding alignment on total allocated pages (including dp_size reserved pages)
+        if hasattr(self, "mesh") and self.mesh is not None and "data" in self.mesh.shape:
+            data_mesh_dim = self.mesh.shape["data"]
+            if data_mesh_dim > 1:
+                usable_pages = token_capacity // self.server_args.page_size
+                allocated_pages = usable_pages + dp_size
+                step = math.lcm(dp_size, data_mesh_dim)
+                allocated_pages = (allocated_pages // step) * step
+                usable_pages = allocated_pages - dp_size
+                if usable_pages <= 0:
+                    raise RuntimeError(
+                        "Not enough KV cache capacity to align allocated pages "
+                        f"to data={data_mesh_dim} with dp_size={dp_size} reserved pages."
+                    )
+                token_capacity = usable_pages * self.server_args.page_size
+
         logger.info(
             "ModelRunner per dp max_total_num_tokens after dp_size %s: %s",
             dp_size,
@@ -632,8 +692,10 @@ class ModelRunnerKVCacheMixin:
             # `_validate_kv_pool_compatibility` owns the user-facing check at
             # dispatch. Keep this assertion as a defensive invariant in case a
             # future caller constructs a hybrid pool through this lower seam.
-            assert not kvcache_kwargs.get(
-                "num_indexer_layers"
+            # QSA's indexer cache is fine: the wrapper forwards its accessors.
+            assert not (
+                kvcache_kwargs.get("num_indexer_layers")
+                and token_to_kv_pool_class is MLATokenToKVPool
             ), "hybrid-recurrent models do not support --attention-backend dsa_sparse"
 
             return HybridLinearKVPool(
@@ -666,32 +728,16 @@ class ModelRunnerKVCacheMixin:
                 "HybridLinearKVPool has no DSA indexer cache interface"
             )
 
-    def _init_pools(self: ModelRunner, max_num_reqs: int, dp_size: int):
-        """Create ReqToTokenPool, KV pool, allocator, and MemoryPools."""
-        self._validate_kv_pool_compatibility()
+    def _create_token_to_kv_pool(
+        self: ModelRunner,
+        dp_size: int,
+        *,
+        abstract: bool = False,
+        max_num_reqs: int | None = None,
+    ):
+        """Construct serving cache layouts, optionally as offline array descriptors."""
+        from sgl_jax.srt.mem_cache.memory_pool import MHATokenToKVPool, SWAKVPool
 
-        from sgl_jax.srt.mem_cache.allocator import (
-            PagedTokenToKVPoolAllocator,
-            SWATokenToKVPoolAllocator,
-            TokenToKVPoolAllocator,
-        )
-        from sgl_jax.srt.mem_cache.memory_pool import (
-            MHATokenToKVPool,
-            ReqToTokenPool,
-            SWAKVPool,
-        )
-
-        has_recurrent_state = self.linear_recurrent_config is not None
-
-        # --- ReqToTokenPool (non-hybrid only; hybrid defers to after KV pool) ---
-        if self.req_to_token_pool is None and not has_recurrent_state:
-            self.req_to_token_pool = ReqToTokenPool(
-                size=max_num_reqs,
-                max_context_len=self.model_config.context_len + 4,
-                dtype=np.int32,
-            )
-
-        # --- KV pool ---
         if self.is_hybrid:
             swa_num_kv_heads = getattr(self.model_config.hf_config, "swa_num_key_value_heads", None)
             if swa_num_kv_heads is not None:
@@ -707,7 +753,7 @@ class ModelRunnerKVCacheMixin:
             if swa_head_dim is not None:
                 swa_head_dim = (swa_head_dim + 127) // 128 * 128
 
-            self.token_to_kv_pool = SWAKVPool(
+            return SWAKVPool(
                 size=self.full_max_total_num_tokens,
                 size_swa=self.swa_max_total_num_tokens,
                 page_size=self.page_size,
@@ -721,6 +767,7 @@ class ModelRunnerKVCacheMixin:
                 swa_head_dim=swa_head_dim,
                 mesh=self.mesh,
                 dp_size=dp_size,
+                abstract=abstract,
             )
         elif self.use_mla_backend and self.server_args.attention_backend in ("fa", "dsa_sparse"):
             hf_text_config = self.model_config.hf_text_config
@@ -739,23 +786,53 @@ class ModelRunnerKVCacheMixin:
                 dsa_kwargs["indexer_key_dim"] = indexer_key_dim
                 dsa_kwargs["num_indexer_layers"] = num_indexer_layers
 
-            self.token_to_kv_pool = self._maybe_wrap_hybrid_kv_pool(
+            return self._maybe_wrap_hybrid_kv_pool(
                 MLATokenToKVPool,
                 kv_lora_rank=kv_lora_rank,
                 qk_rope_head_dim=qk_rope_head_dim,
                 dp_size=dp_size,
+                abstract=abstract,
                 **dsa_kwargs,
             )
         else:
-            pool_class = getattr(self.attn_backend, "token_to_kv_pool_class", MHATokenToKVPool)
-            self.token_to_kv_pool = self._maybe_wrap_hybrid_kv_pool(
-                pool_class,
+            mha_kwargs = dict(
                 head_num=self.model_config.get_total_num_kv_heads_with_replication(
                     self.attention_tp_size
                 ),
                 head_dim=(self.model_config.head_dim + 127) // 128 * 128,
                 dp_size=dp_size,
+                abstract=abstract,
             )
+            pool_class = getattr(self.attn_backend, "token_to_kv_pool_class", MHATokenToKVPool)
+            pool_kwargs = dict(getattr(self.attn_backend, "token_to_kv_pool_kwargs", None) or {})
+            # A backend asking for max_reqs sizes a per-request buffer by it; the
+            # request limit is only known here.
+            if "max_reqs" in pool_kwargs:
+                pool_kwargs["max_reqs"] = max_num_reqs
+            return self._maybe_wrap_hybrid_kv_pool(pool_class, **pool_kwargs, **mha_kwargs)
+
+    def _init_pools(self: ModelRunner, max_num_reqs: int, dp_size: int):
+        """Create ReqToTokenPool, KV pool, allocator, and MemoryPools."""
+        self._validate_kv_pool_compatibility()
+
+        from sgl_jax.srt.mem_cache.allocator import (
+            PagedTokenToKVPoolAllocator,
+            SWATokenToKVPoolAllocator,
+            TokenToKVPoolAllocator,
+        )
+        from sgl_jax.srt.mem_cache.memory_pool import ReqToTokenPool
+
+        has_recurrent_state = self.linear_recurrent_config is not None
+
+        # --- ReqToTokenPool (non-hybrid only; hybrid defers to after KV pool) ---
+        if self.req_to_token_pool is None and not has_recurrent_state:
+            self.req_to_token_pool = ReqToTokenPool(
+                size=max_num_reqs,
+                max_context_len=self.model_config.context_len + 4,
+                dtype=np.int32,
+            )
+
+        self.token_to_kv_pool = self._create_token_to_kv_pool(dp_size, max_num_reqs=max_num_reqs)
 
         # --- MemoryPools wrapper (+ hybrid ReqToTokenPool) ---
         if has_recurrent_state:
@@ -774,6 +851,17 @@ class ModelRunnerKVCacheMixin:
             )
         else:
             self.memory_pools = _build_non_hybrid_memory_pools(self.token_to_kv_pool)
+
+        # A per-request buffer in the KV pool is indexed by ReqToTokenPool slot.
+        # Its writes drop out-of-range rows, as a JAX scatter does by default, so a buffer
+        # smaller than the request pool would lose rows silently.
+        kv_pool = getattr(self.token_to_kv_pool, "full_kv_pool", self.token_to_kv_pool)
+        request_rows = getattr(kv_pool, "max_reqs", None)
+        if request_rows and request_rows < self.req_to_token_pool.size:
+            raise ValueError(
+                f"{type(kv_pool).__name__} has {request_rows} per-request rows but "
+                f"ReqToTokenPool has {self.req_to_token_pool.size} slots"
+            )
 
         # --- Allocator ---
         if self.token_to_kv_pool_allocator is None:
@@ -895,12 +983,20 @@ class ModelRunnerKVCacheMixin:
         return get_qwen3_5_hybrid_config(self.model_config.hf_config)
 
     @property
+    def qwen4_exp_config(self: ModelRunner):
+        from sgl_jax.srt.configs.qwen4_exp import get_qwen4_exp_config
+
+        return get_qwen4_exp_config(self.model_config.hf_config)
+
+    @property
     def linear_recurrent_config(self: ModelRunner):
         """Return linear recurrent config if the model has linear attention, else None."""
         if self.kimi_linear_config is not None:
             return self.kimi_linear_config
         if self.qwen3_5_hybrid_config is not None:
             return self.qwen3_5_hybrid_config.text_config
+        if self.qwen4_exp_config is not None:
+            return self.qwen4_exp_config.text_config
         return self.lightning_config
 
     def _kv_pool_layer_count(self: ModelRunner):
@@ -908,6 +1004,14 @@ class ModelRunnerKVCacheMixin:
 
         For hybrid recurrent models, only full-attention layers need KV cache.
         """
+
+        if getattr(self, "is_draft_worker", False) and is_single_layer_draft_arch(
+            self.model_config.hf_config
+        ):
+            # NextN / MTP predictors: one decoder layer per draft worker. Other draft
+            # models (DFlash: 5 layers) keep their real layer count (#1639 review).
+            return 1
+
         cfg = self.linear_recurrent_config
         if cfg is not None:
             return len(cfg.full_attention_layer_ids)

@@ -1,12 +1,11 @@
 import logging
 from collections.abc import Callable
-from types import SimpleNamespace
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 from flax import nnx
-from jax.sharding import PartitionSpec
+from jax.sharding import NamedSharding, PartitionSpec
 
 from sgl_jax.srt.configs.model_config import ModelConfig
 from sgl_jax.srt.hf_transformers_utils import get_hf_text_config
@@ -15,16 +14,18 @@ from sgl_jax.srt.layers.linear import LinearBase
 from sgl_jax.srt.layers.logits_processor import LogitsMetadata, LogitsProcessor
 from sgl_jax.srt.mem_cache.memory_pool import MemoryPools
 from sgl_jax.srt.model_executor.forward_batch_info import ForwardBatch
+from sgl_jax.srt.model_loader.weights import WeightLoader, WeightSpec
 from sgl_jax.srt.models.qwen3 import QWen3Model
 from sgl_jax.srt.multimodal.common.modality_enum import Modality, MultimodalDataItem
-from sgl_jax.srt.multimodal.in_model.interface import InModelMultimodalContract
+from sgl_jax.srt.multimodal.in_model.interface import (
+    InModelMultimodalContract,
+    VisionInputSpec,
+)
 from sgl_jax.srt.multimodal.in_model.lane_packing import (
     encoder_num_lanes,
-    precompile_mrope_vision_model,
     run_mrope_vision_model,
 )
 from sgl_jax.srt.multimodal.layers.attention.flash_attention_backend import (
-    VisionAttentionMetadata,
     make_vision_attention_backend,
 )
 from sgl_jax.srt.multimodal.layers.vision_sharding import (
@@ -32,8 +33,6 @@ from sgl_jax.srt.multimodal.layers.vision_sharding import (
     apply_data_sharding,
     resolve_encoder_tp,
 )
-from sgl_jax.srt.utils.common_utils import resolve_vision_patch_buckets
-from sgl_jax.srt.utils.weight_utils import WeightLoader, WeightMapping
 
 logger = logging.getLogger(__name__)
 
@@ -42,21 +41,22 @@ def create_qwen3_weight_mappings(
     config,
     source_prefix: str = "model",
     target_prefix: str = "model",
+    *,
+    lm_head: ParallelLMHead | None = None,
 ) -> dict:
     mappings = {
-        f"{source_prefix}.embed_tokens.weight": WeightMapping(
+        f"{source_prefix}.embed_tokens.weight": WeightSpec(
             target_path=f"{target_prefix}.embed_tokens.embedding",
             sharding=("tensor", None),
             transpose=False,
         ),
-        f"{source_prefix}.norm.weight": WeightMapping(
+        f"{source_prefix}.norm.weight": WeightSpec(
             target_path=f"{target_prefix}.norm.scale", sharding=(None,), transpose=False
         ),
     }
     if not getattr(config, "tie_word_embeddings", False):
-        mappings["lm_head.weight"] = WeightMapping(
-            target_path="lm_head.embedding", sharding=("tensor", None), transpose=False
-        )
+        assert lm_head is not None
+        mappings["lm_head.weight"] = lm_head.weight_mapping("lm_head.embedding")
     for layer_idx in range(config.num_hidden_layers):
         mappings.update(
             create_qwen3_layer_mappings(config, layer_idx, source_prefix, target_prefix)
@@ -73,55 +73,61 @@ def create_qwen3_layer_mappings(
     source = f"{source_prefix}.layers.{layer_idx}"
     target = f"{target_prefix}.layers.{layer_idx}"
     mappings = {
-        f"{source}.input_layernorm.weight": WeightMapping(
-            target_path=f"{target}.input_layernorm.scale", sharding=(None,), transpose=False
+        f"{source}.input_layernorm.weight": WeightSpec(
+            target_path=f"{target}.input_layernorm.scale",
+            sharding=(None,),
+            transpose=False,
         ),
-        f"{source}.post_attention_layernorm.weight": WeightMapping(
+        f"{source}.post_attention_layernorm.weight": WeightSpec(
             target_path=f"{target}.post_attention_layernorm.scale",
             sharding=(None,),
             transpose=False,
         ),
-        f"{source}.self_attn.q_proj.weight": WeightMapping(
+        f"{source}.self_attn.q_proj.weight": WeightSpec(
             target_path=f"{target}.self_attn.q_proj.weight",
             sharding=(None, "tensor"),
             transpose=True,
             kv_head_padding=False,
         ),
-        f"{source}.self_attn.k_proj.weight": WeightMapping(
+        f"{source}.self_attn.k_proj.weight": WeightSpec(
             target_path=f"{target}.self_attn.k_proj.weight",
             sharding=(None, "tensor"),
             transpose=True,
             kv_head_padding=True,
         ),
-        f"{source}.self_attn.v_proj.weight": WeightMapping(
+        f"{source}.self_attn.v_proj.weight": WeightSpec(
             target_path=f"{target}.self_attn.v_proj.weight",
             sharding=(None, "tensor"),
             transpose=True,
             kv_head_padding=True,
         ),
-        f"{source}.self_attn.o_proj.weight": WeightMapping(
+        f"{source}.self_attn.o_proj.weight": WeightSpec(
             target_path=f"{target}.self_attn.o_proj.weight",
             sharding=("tensor", None),
             transpose=True,
             kv_head_padding=False,
         ),
-        f"{source}.self_attn.q_norm.weight": WeightMapping(
-            target_path=f"{target}.self_attn.q_norm.scale", sharding=(None,), transpose=False
+        f"{source}.self_attn.q_norm.weight": WeightSpec(
+            target_path=f"{target}.self_attn.q_norm.scale",
+            sharding=(None,),
+            transpose=False,
         ),
-        f"{source}.self_attn.k_norm.weight": WeightMapping(
-            target_path=f"{target}.self_attn.k_norm.scale", sharding=(None,), transpose=False
+        f"{source}.self_attn.k_norm.weight": WeightSpec(
+            target_path=f"{target}.self_attn.k_norm.scale",
+            sharding=(None,),
+            transpose=False,
         ),
-        f"{source}.mlp.gate_proj.weight": WeightMapping(
+        f"{source}.mlp.gate_proj.weight": WeightSpec(
             target_path=f"{target}.mlp.gate_proj.weight",
             sharding=(None, "tensor"),
             transpose=True,
         ),
-        f"{source}.mlp.up_proj.weight": WeightMapping(
+        f"{source}.mlp.up_proj.weight": WeightSpec(
             target_path=f"{target}.mlp.up_proj.weight",
             sharding=(None, "tensor"),
             transpose=True,
         ),
-        f"{source}.mlp.down_proj.weight": WeightMapping(
+        f"{source}.mlp.down_proj.weight": WeightSpec(
             target_path=f"{target}.mlp.down_proj.weight",
             sharding=("tensor", None),
             transpose=True,
@@ -129,13 +135,13 @@ def create_qwen3_layer_mappings(
     }
     if getattr(config, "attention_bias", False):
         for name, padding in (("q_proj", False), ("k_proj", True), ("v_proj", True)):
-            mappings[f"{source}.self_attn.{name}.bias"] = WeightMapping(
+            mappings[f"{source}.self_attn.{name}.bias"] = WeightSpec(
                 target_path=f"{target}.self_attn.{name}.bias",
                 sharding=(None,),
                 transpose=False,
                 kv_head_padding=padding,
             )
-        mappings[f"{source}.self_attn.o_proj.bias"] = WeightMapping(
+        mappings[f"{source}.self_attn.o_proj.bias"] = WeightSpec(
             target_path=f"{target}.self_attn.o_proj.bias",
             sharding=(None,),
             transpose=False,
@@ -155,7 +161,7 @@ def _merge_order(x: np.ndarray, t: int, h: int, w: int, merge: int) -> np.ndarra
 def _rope(x: jax.Array, freqs: jax.Array) -> jax.Array:
     half = x.shape[-1] // 2
     left, right = x[..., :half], x[..., half:]
-    cos, sin = jnp.cos(freqs)[:, :, None], jnp.sin(freqs)[:, :, None]
+    cos, sin = jnp.cos(freqs)[:, None, :], jnp.sin(freqs)[:, None, :]
     return jnp.concatenate((left * cos - right * sin, left * sin + right * cos), axis=-1).astype(
         x.dtype
     )
@@ -181,10 +187,10 @@ class Qwen3VLPatchEmbed(nnx.Module):
         )
 
     def __call__(self, x):
-        batch, length, _ = x.shape
+        tokens = x.shape[0]
         sh = self.specs.sharding(self.specs.batch_axis)
         x = x.reshape(
-            batch * length,
+            tokens,
             self.channels,
             self.temporal,
             self.patch,
@@ -192,7 +198,7 @@ class Qwen3VLPatchEmbed(nnx.Module):
             out_sharding=sh,
         )
         x = jnp.transpose(x, (0, 2, 3, 4, 1))
-        x = self.proj(x, out_sharding=sh).reshape(batch, length, self.hidden, out_sharding=sh)
+        x = self.proj(x, out_sharding=sh).reshape(tokens, self.hidden, out_sharding=sh)
         if self.mesh is not None:
             x = apply_data_sharding(x, self.mesh, PartitionSpec(self.specs.batch_axis))
         return x
@@ -221,7 +227,7 @@ class Qwen3VLVisionMLP(nnx.Module):
 
     def __call__(self, x):
         specs = self.specs
-        x, _ = self.fc1(x, out_sharding=specs.sharding(specs.batch_axis, None, specs.tensor_axis))
+        x, _ = self.fc1(x, out_sharding=specs.sharding(specs.batch_axis, specs.tensor_axis))
         x = jax.nn.gelu(x, approximate=self.approximate)
         return self.fc2(x, out_sharding=specs.sharding(specs.batch_axis))[0]
 
@@ -263,10 +269,10 @@ class Qwen3VLVisionAttention(nnx.Module):
             use_varlen=True,
         )
 
-    def __call__(self, x, freqs, metadata):
-        batch, length, _ = x.shape
+    def __call__(self, x, freqs, cu_seqlens, *, max_seq_len: int):
+        tokens, hidden = x.shape
         specs = self.specs
-        col = specs.sharding(specs.batch_axis, None, specs.tensor_axis)
+        col = specs.sharding(specs.batch_axis, specs.tensor_axis)
         q, k, v = (
             layer(x, out_sharding=col)[0]
             for layer in (
@@ -275,13 +281,20 @@ class Qwen3VLVisionAttention(nnx.Module):
                 self.v_proj,
             )
         )
-        sharding = specs.sharding(specs.batch_axis, None, specs.tensor_axis, None)
+        sharding = specs.sharding(specs.batch_axis, specs.tensor_axis, None)
         q, k, v = (
-            value.reshape(batch, length, self.heads, self.head_dim, out_sharding=sharding)
+            value.reshape(tokens, self.heads, self.head_dim, out_sharding=sharding)
             for value in (q, k, v)
         )
-        output = self.backend(_rope(q, freqs), _rope(k, freqs), v, metadata)
-        output = output.reshape(batch, length, self.hidden, out_sharding=col)
+        q, k = _rope(q, freqs), _rope(k, freqs)
+        output = self.backend(
+            q,
+            k,
+            v,
+            cu_seqlens,
+            max_seq_len=max_seq_len,
+        )
+        output = output.reshape(tokens, hidden, out_sharding=col)
         return self.proj(output, out_sharding=specs.sharding(specs.batch_axis))[0]
 
 
@@ -300,8 +313,13 @@ class Qwen3VLVisionBlock(nnx.Module):
         self.attn = Qwen3VLVisionAttention(config, dtype, mesh, specs)
         self.mlp = Qwen3VLVisionMLP(config, dtype, mesh, specs)
 
-    def __call__(self, x, freqs, metadata):
-        x = x + self.attn(self.norm1(x), freqs, metadata)
+    def __call__(self, x, freqs, cu_seqlens, *, max_seq_len: int):
+        x = x + self.attn(
+            self.norm1(x),
+            freqs,
+            cu_seqlens,
+            max_seq_len=max_seq_len,
+        )
         return x + self.mlp(self.norm2(x))
 
 
@@ -339,10 +357,10 @@ class Qwen3VLPatchMerger(nnx.Module):
         specs = self.specs
         sharding = specs.sharding(specs.batch_axis)
         if self.postshuffle:
-            x = self.norm(x.reshape(x.shape[0], -1, self.hidden, out_sharding=sharding))
+            x = self.norm(x.reshape(-1, self.hidden, out_sharding=sharding))
         else:
-            x = self.norm(x).reshape(x.shape[0], -1, self.hidden, out_sharding=sharding)
-        x, _ = self.fc1(x, out_sharding=specs.sharding(specs.batch_axis, None, specs.tensor_axis))
+            x = self.norm(x).reshape(-1, self.hidden, out_sharding=sharding)
+        x, _ = self.fc1(x, out_sharding=specs.sharding(specs.batch_axis, specs.tensor_axis))
         x = jax.nn.gelu(x, approximate=False)
         return self.fc2(x, out_sharding=sharding)[0]
 
@@ -355,20 +373,14 @@ class Qwen3VLVisionModel(nnx.Module):
         rngs=None,
         mesh=None,
         tp=False,
-        input_buckets: tuple[int, ...] | None = None,
     ):
         rngs = rngs or nnx.Rngs(0)
         self.mesh = mesh
         self.dtype = dtype
         self.vision_tp = tp
         self.specs = VisionShardSpecs(mesh, tp)
-        self.input_buckets = input_buckets or tuple(resolve_vision_patch_buckets(None))
         self.merge = int(config.spatial_merge_size)
         self.spatial_merge_unit = self.merge**2
-        if any(bucket <= 0 or bucket % self.spatial_merge_unit for bucket in self.input_buckets):
-            raise ValueError(
-                f"vision patch buckets must be positive multiples of {self.spatial_merge_unit}"
-            )
         self.num_grid = int(config.num_position_embeddings**0.5)
         self.rotary_dim = int(config.hidden_size) // int(config.num_heads) // 2
         self.patch_embed = Qwen3VLPatchEmbed(config, dtype, rngs, mesh, tp)
@@ -438,9 +450,9 @@ class Qwen3VLVisionModel(nnx.Module):
     def __call__(
         self,
         patches: jax.Array,
-        grid_thw: np.ndarray | jax.Array,
+        **metadata: jax.Array,
     ) -> jax.Array:
-        return self.encode(patches, grid_thw)
+        return self.encode(patches, **metadata)
 
     def _forward(
         self,
@@ -448,8 +460,10 @@ class Qwen3VLVisionModel(nnx.Module):
         pos_indices: jax.Array,
         pos_weights: jax.Array,
         position_ids: jax.Array,
-        metadata: VisionAttentionMetadata,
+        cu_seqlens: jax.Array,
     ) -> tuple[jax.Array, jax.Array]:
+        tokens = patches.shape[0]
+        capacity = tokens // encoder_num_lanes(self.mesh, self.vision_tp)
         inv_freq = 1.0 / (
             10000.0 ** (jnp.arange(0, self.rotary_dim, 2, dtype=jnp.float32) / self.rotary_dim)
         )
@@ -469,33 +483,42 @@ class Qwen3VLVisionModel(nnx.Module):
         # by every block.
         deepstack = []
         for index, block in enumerate(self.blocks):
-            x = block(x, rotary_pos_emb, metadata)
+            x = block(x, rotary_pos_emb, cu_seqlens, max_seq_len=capacity)
             if index in self.deepstack_indexes:
                 merger = self.deepstack_mergers[self.deepstack_indexes.index(index)]
                 deepstack.append(merger(x))
         merged = self.merger(x)
         deepstack = (
-            jnp.stack(deepstack, axis=2)
+            jnp.stack(deepstack, axis=1)
             if deepstack
-            else jnp.empty((x.shape[0], merged.shape[1], 0, merged.shape[2]), x.dtype)
+            else jnp.empty((merged.shape[0], 0, merged.shape[1]), x.dtype)
         )
         return merged, deepstack
 
     @jax.jit
-    def _encode_jit(
+    def encode(
         self,
         patches: jax.Array,
+        *,
         pos_indices: jax.Array,
         pos_weights: jax.Array,
         position_ids: jax.Array,
-        metadata: VisionAttentionMetadata,
+        cu_seqlens: jax.Array,
     ) -> jax.Array:
+        """Encode flat patches with lane-major position and attention metadata."""
+        token_sharding = self.specs.sharding(self.specs.batch_axis)
+        patches = patches.reshape(
+            -1,
+            self.patch_dim,
+            out_sharding=token_sharding,
+        )
+        patches = patches.astype(self.dtype)
         output, deepstack = self._forward(
             patches,
             pos_indices,
             pos_weights,
             position_ids,
-            metadata,
+            cu_seqlens,
         )
         if self.mesh is not None:
             output = apply_data_sharding(output, self.mesh, PartitionSpec(self.specs.batch_axis))
@@ -503,43 +526,41 @@ class Qwen3VLVisionModel(nnx.Module):
                 deepstack, self.mesh, PartitionSpec(self.specs.batch_axis)
             )
         # Concatenate deepstack planes onto the trailing feature axis so the merge
-        # gathers one [rows, cap, (1+D)*H] tensor. D is static at trace time.
-        deepstack_dim = deepstack.shape[2]
+        # gathers one [rows, (1+D)*H] tensor. D is static at trace time.
+        deepstack_dim = deepstack.shape[1]
         if deepstack_dim:
-            b, cap, h = output.shape
+            tokens, hidden = output.shape
             output = jnp.concatenate(
-                [output, deepstack.reshape(b, cap, deepstack_dim * h)], axis=-1
+                [
+                    output,
+                    deepstack.reshape(
+                        tokens,
+                        deepstack_dim * hidden,
+                        out_sharding=token_sharding,
+                    ),
+                ],
+                axis=-1,
             )
         return output
 
-    def encode(self, patches: jax.Array, grid_thw: np.ndarray | jax.Array) -> jax.Array:
-        batch_sharding = self.specs.sharding(self.specs.batch_axis)
-        patches = jax.device_put(patches, batch_sharding)
-        metadata = jax.device_put(
-            self._build_metadata(grid_thw, patches.shape[1]),
-            batch_sharding,
-        )
-        if self.mesh is None:
-            return self._encode_jit(patches, *metadata)
-        with jax.set_mesh(self.mesh):
-            return self._encode_jit(patches, *metadata)
+    def prepare_metadata(
+        self,
+        grid_thw: np.ndarray,
+        capacity: int,
+        *,
+        sharding: NamedSharding,
+    ) -> dict[str, jax.Array]:
+        with jax.profiler.TraceAnnotation("encoder_metadata_host_build"):
+            grid_thw = np.asarray(grid_thw, dtype=np.int32)
+            if grid_thw.ndim == 2:
+                grid_thw = grid_thw[None]
+            if grid_thw.ndim != 3 or grid_thw.shape[-1] != 3:
+                raise ValueError("grid_thw must have shape [items, 3] or [lanes, items, 3]")
+            metadata = self._build_metadata(grid_thw, capacity)
+        with jax.profiler.TraceAnnotation("encoder_metadata_device_put"):
+            return jax.device_put(metadata, sharding)
 
-    def precompile(self) -> None:
-        precompile_mrope_vision_model(
-            self,
-            mesh=self.mesh,
-            num_lanes=encoder_num_lanes(self.mesh, self.vision_tp),
-            buckets=self.input_buckets,
-            patch_dim=self.patch_dim,
-            merge_unit=self.spatial_merge_unit,
-            rope_type="rope_3d",
-            dtype=self.dtype,
-        )
-
-    def _build_metadata(self, grid_thw: np.ndarray | jax.Array, capacity: int):
-        grid_thw = np.asarray(jax.device_get(grid_thw), dtype=np.int32)
-        if grid_thw.ndim == 2:
-            grid_thw = grid_thw[None]
+    def _build_metadata(self, grid_thw: np.ndarray, capacity: int):
         lane_metadata = [
             self._lane_metadata(
                 [tuple(map(int, grid)) for grid in lane if np.any(grid)],
@@ -547,14 +568,13 @@ class Qwen3VLVisionModel(nnx.Module):
             )
             for lane in grid_thw
         ]
-        pos_indices, pos_weights, position_ids, cu_seqlens = (
-            np.stack(values) for values in zip(*lane_metadata, strict=True)
-        )
-        metadata = VisionAttentionMetadata(
-            cu_seqlens,
-            max_seq_len=capacity,
-        )
-        return pos_indices, pos_weights, position_ids, metadata
+        pos_indices, pos_weights, position_ids, cu_seqlens = zip(*lane_metadata)
+        return {
+            "pos_indices": np.concatenate([indices.T for indices in pos_indices]),
+            "pos_weights": np.concatenate([weights.T for weights in pos_weights]),
+            "position_ids": np.concatenate(position_ids),
+            "cu_seqlens": np.concatenate(cu_seqlens),
+        }
 
 
 class Qwen3VLForConditionalGeneration(nnx.Module, InModelMultimodalContract):
@@ -565,25 +585,10 @@ class Qwen3VLForConditionalGeneration(nnx.Module, InModelMultimodalContract):
         self.config = config
         self.text_config = get_hf_text_config(config) or config
         self.dtype = dtype or jnp.bfloat16
-        rope = getattr(self.text_config, "rope_parameters", None)
-        if rope:
-            self.text_config.rope_theta = rope.get(
-                "rope_theta", getattr(self.text_config, "rope_theta", 5_000_000)
-            )
-            self.text_config.rope_scaling = {
-                "rope_type": rope.get("rope_type", "default"),
-                "mrope_section": rope.get("mrope_section", [24, 20, 20]),
-                "mrope_interleaved": True,
-            }
-        elif not getattr(self.text_config, "rope_scaling", None):
-            self.text_config.rope_scaling = {
-                "rope_type": "default",
-                "mrope_section": [24, 20, 20],
-                "mrope_interleaved": True,
-            }
-        self.is_mrope_enabled = "mrope_section" in (
-            getattr(self.text_config, "rope_scaling", None) or {}
-        )
+        rope = self.text_config.rope_parameters
+        rope.setdefault("mrope_section", [24, 20, 20])
+        rope.setdefault("mrope_interleaved", True)
+        self.is_mrope_enabled = "mrope_section" in rope
         self.model = QWen3Model(self.text_config, mesh=mesh, dtype=self.dtype)
         if not getattr(self.text_config, "tie_word_embeddings", False):
             self.lm_head = ParallelLMHead(
@@ -591,10 +596,14 @@ class Qwen3VLForConditionalGeneration(nnx.Module, InModelMultimodalContract):
                 self.text_config.hidden_size,
                 dtype=self.dtype,
                 param_dtype=self.dtype,
-                kernel_axes=("tensor", None),
                 mesh=mesh,
+                enable_dp_lm_head=getattr(config, "enable_dp_lm_head", False),
             )
-        self.logits_processor = LogitsProcessor(self.text_config.vocab_size, mesh=mesh)
+        self.logits_processor = LogitsProcessor(
+            self.text_config.vocab_size,
+            mesh=mesh,
+            enable_dp_lm_head=getattr(config, "enable_dp_lm_head", False),
+        )
         encoder_tp = resolve_encoder_tp(mesh, getattr(config, "vision_encoder_parallel", "dp"))
         self.visual = Qwen3VLVisionModel(
             config.vision_config,
@@ -602,41 +611,35 @@ class Qwen3VLForConditionalGeneration(nnx.Module, InModelMultimodalContract):
             rngs,
             mesh,
             encoder_tp,
-            tuple(
-                resolve_vision_patch_buckets(
-                    getattr(config, "precompile_vision_patch_paddings", None)
-                )
-            ),
         )
         self.deepstack_visual_layers = len(self.visual.deepstack_indexes)
+
+        self.vision_input_spec = VisionInputSpec(
+            patch_dim=self.visual.patch_dim,
+            spatial_merge_size=int(config.vision_config.spatial_merge_size),
+            dtype=np.dtype("float32"),
+        )
 
     def get_input_embeddings(self) -> Callable[[jax.Array], jax.Array]:
         return self.model.embed_tokens
 
-    def precompile_multimodal(self) -> None:
-        self.visual.precompile()
+    def get_image_feature(self, items_per_lane: list[list[MultimodalDataItem]]) -> jax.Array:
+        return self._get_visual_feature(items_per_lane)
 
-    def get_multimodal_embedding_packed_capacities(self) -> tuple[int, ...]:
-        rows = encoder_num_lanes(self.mesh, self.visual.vision_tp)
-        unit = self.visual.spatial_merge_unit
-        return tuple(rows * bucket // unit for bucket in self.visual.input_buckets)
+    def get_video_feature(self, items_per_lane: list[list[MultimodalDataItem]]) -> jax.Array:
+        return self._get_visual_feature(items_per_lane)
 
-    def get_image_feature(self, items: list[MultimodalDataItem]) -> jax.Array:
-        return self._get_visual_feature(items)
-
-    def get_video_feature(self, items: list[MultimodalDataItem]) -> jax.Array:
-        return self._get_visual_feature(items)
-
-    def _get_visual_feature(self, items: list[MultimodalDataItem]) -> jax.Array:
+    def _get_visual_feature(self, items_per_lane: list[list[MultimodalDataItem]]) -> jax.Array:
         num_lanes = encoder_num_lanes(self.mesh, self.visual.vision_tp)
         return run_mrope_vision_model(
             self.visual,
-            items,
+            items_per_lane,
             mesh=self.mesh,
             num_lanes=num_lanes,
-            buckets=self.visual.input_buckets,
             merge_unit=self.visual.spatial_merge_unit,
             rope_type="rope_3d",
+            input_sharding=self.visual.specs.sharding(self.visual.specs.batch_axis),
+            output_sharding=self.visual.specs.sharding(),
         )
 
     def get_multimodal_encode_funcs(self):
@@ -647,22 +650,14 @@ class Qwen3VLForConditionalGeneration(nnx.Module, InModelMultimodalContract):
         }
 
     def load_weights(self, model_config: ModelConfig) -> None:
-        text_loader = WeightLoader(self, model_config, self.mesh, self.dtype)
-        text_loader.load_weights_from_safetensors(
-            create_qwen3_weight_mappings(
-                self.text_config, source_prefix="model.language_model", target_prefix="model"
-            )
+        mappings = create_qwen3_weight_mappings(
+            self.text_config,
+            source_prefix="model.language_model",
+            target_prefix="model",
+            lm_head=getattr(self, "lm_head", None),
         )
-        config = self.config.vision_config
-        vision_config = SimpleNamespace(
-            model_path=model_config.model_path,
-            num_attention_heads=config.num_heads,
-            hidden_size=config.hidden_size,
-            get_total_num_kv_heads=lambda: config.num_heads,
-        )
-        WeightLoader(self, vision_config, self.mesh, self.dtype).load_weights_from_safetensors(
-            self._vision_weight_mappings()
-        )
+        mappings.update(self._vision_weight_mappings())
+        WeightLoader(self, model_config, self.mesh, self.dtype).load(mappings)
         logger.info("Qwen3-VL weights loaded successfully")
 
     @classmethod
@@ -670,21 +665,23 @@ class Qwen3VLForConditionalGeneration(nnx.Module, InModelMultimodalContract):
         specs = visual.specs
         col, row = specs.col_kernel_axes, specs.row_kernel_axes
         mappings = {
-            "model.visual.patch_embed.proj.weight": WeightMapping(
+            "model.visual.patch_embed.proj.weight": WeightSpec(
                 "visual.patch_embed.proj.kernel",
                 (None, None, None, None, None),
                 transpose_axes=(2, 3, 4, 1, 0),
             ),
-            "model.visual.patch_embed.proj.bias": WeightMapping(
+            "model.visual.patch_embed.proj.bias": WeightSpec(
                 "visual.patch_embed.proj.bias", (None,), transpose=False
             ),
-            "model.visual.pos_embed.weight": WeightMapping(
+            "model.visual.pos_embed.weight": WeightSpec(
                 "visual.pos_embed.embedding", (None, None), transpose=False
             ),
         }
         for index in range(config.vision_config.depth):
             source, target = f"model.visual.blocks.{index}", f"visual.blocks.{index}"
-            mappings.update(cls._block_mappings(source, target, col, row))
+            mappings.update(
+                cls._block_mappings(source, target, col, row, config.vision_config.hidden_size)
+            )
         mappings.update(cls._merger_mappings("model.visual.merger", "visual.merger", col, row))
         for index, _ in enumerate(visual.deepstack_indexes):
             mappings.update(
@@ -703,25 +700,31 @@ class Qwen3VLForConditionalGeneration(nnx.Module, InModelMultimodalContract):
     @staticmethod
     def _linear(source, target, sharding):
         return {
-            f"{source}.weight": WeightMapping(target + ".weight", sharding, transpose=True),
-            f"{source}.bias": WeightMapping(target + ".bias", (None,), transpose=False),
+            f"{source}.weight": WeightSpec(target + ".weight", sharding, transpose=True),
+            f"{source}.bias": WeightSpec(target + ".bias", (None,), transpose=False),
         }
 
     @classmethod
-    def _block_mappings(cls, source, target, col, row):
+    def _block_mappings(cls, source, target, col, row, hidden_size):
         mappings = {}
         for name in ("norm1", "norm2"):
-            mappings[f"{source}.{name}.weight"] = WeightMapping(
+            mappings[f"{source}.{name}.weight"] = WeightSpec(
                 f"{target}.{name}.scale", (None,), transpose=False
             )
-            mappings[f"{source}.{name}.bias"] = WeightMapping(
+            mappings[f"{source}.{name}.bias"] = WeightSpec(
                 f"{target}.{name}.bias", (None,), transpose=False
             )
-        mappings[f"{source}.attn.qkv.weight"] = WeightMapping(
-            [f"{target}.attn.{name}_proj.weight" for name in "qkv"], col, transpose=True
+        mappings[f"{source}.attn.qkv.weight"] = WeightSpec(
+            [f"{target}.attn.{name}_proj.weight" for name in "qkv"],
+            col,
+            transpose=True,
+            split_sizes=(hidden_size,) * 3,
         )
-        mappings[f"{source}.attn.qkv.bias"] = WeightMapping(
-            [f"{target}.attn.{name}_proj.bias" for name in "qkv"], (None,), transpose=False
+        mappings[f"{source}.attn.qkv.bias"] = WeightSpec(
+            [f"{target}.attn.{name}_proj.bias" for name in "qkv"],
+            (None,),
+            transpose=False,
+            split_sizes=(hidden_size,) * 3,
         )
         mappings.update(cls._linear(f"{source}.attn.proj", f"{target}.attn.proj", row))
         mappings.update(cls._linear(f"{source}.mlp.linear_fc1", f"{target}.mlp.fc1", col))
@@ -731,10 +734,8 @@ class Qwen3VLForConditionalGeneration(nnx.Module, InModelMultimodalContract):
     @classmethod
     def _merger_mappings(cls, source, target, col, row):
         mappings = {
-            f"{source}.norm.weight": WeightMapping(
-                f"{target}.norm.scale", (None,), transpose=False
-            ),
-            f"{source}.norm.bias": WeightMapping(f"{target}.norm.bias", (None,), transpose=False),
+            f"{source}.norm.weight": WeightSpec(f"{target}.norm.scale", (None,), transpose=False),
+            f"{source}.norm.bias": WeightSpec(f"{target}.norm.bias", (None,), transpose=False),
         }
         mappings.update(cls._linear(f"{source}.linear_fc1", f"{target}.fc1", col))
         mappings.update(cls._linear(f"{source}.linear_fc2", f"{target}.fc2", row))

@@ -41,6 +41,12 @@ from sgl_jax.srt.speculative.spec_info import SpeculativeAlgorithm
 logger = logging.getLogger(__name__)
 
 
+def _prepare_model_state(runner, leaves):
+    """Apply the attention backend's in-JIT weight preparation, if any."""
+    prepare = getattr(runner.attn_backend, "prepare_model_state", None)
+    return leaves if prepare is None else prepare(leaves)
+
+
 @dataclass(frozen=True)
 class DFlashVerifyBucketTemplate:
     extend_seq_lens: np.ndarray
@@ -86,6 +92,17 @@ class TargetVerifyPlan:
 class DFlashWorker(BaseSpecWorker, BaseDraftWorker):
     """DFlash draft/verify runtime worker (greedy, DP/TP aware)."""
 
+    algorithm = SpeculativeAlgorithm.DFLASH
+
+    @staticmethod
+    def _draft_model_class():
+        from sgl_jax.srt.models.dflash import DFlashDraftModel
+
+        return DFlashDraftModel
+
+    def _validate_draft_model(self, draft_model):
+        pass
+
     def __init__(self, server_args, target_worker: ModelWorker):
         super().__init__(
             server_args,
@@ -102,17 +119,14 @@ class DFlashWorker(BaseSpecWorker, BaseDraftWorker):
         draft_server_args = copy.deepcopy(server_args)
         draft_server_args.skip_tokenizer_init = True
 
-        from sgl_jax.srt.models.dflash import DFlashDraftModel
-
         self._worker = ModelWorker(
             server_args=draft_server_args,
             mesh=self.mesh,
             req_to_token_pool=self.req_to_token_pool,
             is_draft_worker=True,
-            model_class=DFlashDraftModel,
+            model_class=self._draft_model_class(),
         )
         draft_model = self.draft_model_runner.model
-
         # Alias the KV allocator so draft block allocation draws from the same
         # free list the target uses (no collision with committed slots).
         self.draft_model_runner.token_to_kv_pool_allocator = self.token_to_kv_pool_allocator
@@ -122,6 +136,7 @@ class DFlashWorker(BaseSpecWorker, BaseDraftWorker):
         self._target_lm_head = head_weight  # [vocab, hidden], for greedy head sampling
         self._target_embed = embed_weight  # [vocab, hidden]
         self._target_vocab_size = int(target_worker.model_runner.model_config.vocab_size)
+        self._validate_draft_model(draft_model)
 
         pool_pages = (
             int(target_worker.max_total_num_tokens) + self.page_size - 1
@@ -162,10 +177,11 @@ class DFlashWorker(BaseSpecWorker, BaseDraftWorker):
         self._init_jit_draft_block()
 
         logger.info(
-            "Initialized DFLASH worker: verify_tokens=%d, draft_query_tokens=%d, "
+            "Initialized %s worker: verify_tokens=%d, draft_query_tokens=%d, "
             "sample_from_anchor=%s, mask_token_id=%d, "
             "draft_layers=%d, page_indices_pool_capacity=%d, "
             "page_indices_per_seq_capacity=%d",
+            self.algorithm.name,
             self.block_size,
             self.draft_query_tokens,
             self.sample_from_anchor,
@@ -675,7 +691,7 @@ class DFlashWorker(BaseSpecWorker, BaseDraftWorker):
         mwb.positions = np.asarray(positions_flat, dtype=np.int32)
         mwb.seq_lens = np.asarray(prefix_lens, dtype=np.int32)
         mwb.capture_hidden_mode = CaptureHiddenMode.NULL
-        mwb.spec_algorithm = SpeculativeAlgorithm.DFLASH
+        mwb.spec_algorithm = self.algorithm
         mwb.spec_info_padded = DFlashVerifyInput(
             draft_token=block_ids_flat,
             draft_token_num=self.block_size,
@@ -720,6 +736,7 @@ class DFlashWorker(BaseSpecWorker, BaseDraftWorker):
         @_partial(
             jax.jit,
             donate_argnames=["memory_pools"],
+            compiler_options=getattr(runner.attn_backend, "compiler_options", None),
             static_argnames=[
                 "model_state_def",
                 "block_size",
@@ -828,6 +845,8 @@ class DFlashWorker(BaseSpecWorker, BaseDraftWorker):
                     dp_size=dp_size,
                 )
 
+            embed, lm_head = _prepare_model_state(runner, (embed, lm_head))
+            model_state_leaves = _prepare_model_state(runner, model_state_leaves)
             input_embedding = embed.at[forward_batch.input_ids].get(out_sharding=embedding_sharding)
             forward_batch.input_embedding = input_embedding
             model_state = jax.tree_util.tree_unflatten(model_state_def, model_state_leaves)
@@ -846,8 +865,8 @@ class DFlashWorker(BaseSpecWorker, BaseDraftWorker):
                 lm_head.T,
                 out_sharding=logits_sharding,
             )[:, :vocab_size]
-            draft_next = jnp.argmax(logits, axis=-1).astype(jnp.int32)
-            draft_next = draft_next.reshape(proposal_hidden.shape[:-1])
+            base_logits = logits.reshape((*proposal_hidden.shape[:-1], vocab_size))
+            draft_next = model.sample_block_tokens(base_logits, seed[:, 0])
             seed = jax.sharding.reshard(seed, cache_row_sharding)
             draft_next = jax.sharding.reshard(draft_next, cache_row_sharding)
             draft_token = jnp.concatenate([seed, draft_next], axis=1).reshape(-1)
@@ -923,6 +942,7 @@ class DFlashWorker(BaseSpecWorker, BaseDraftWorker):
         @_partial(
             jax.jit,
             donate_argnames=["memory_pools", "relay_buffers"],
+            compiler_options=getattr(runner.attn_backend, "compiler_options", None),
             static_argnames=[
                 "model_state_def",
                 "draft_token_num",
@@ -962,6 +982,7 @@ class DFlashWorker(BaseSpecWorker, BaseDraftWorker):
                     page_size=page_size,
                     dp_size=dp_size,
                 )
+            model_state_leaves = _prepare_model_state(runner, model_state_leaves)
             model_state = jax.tree_util.tree_unflatten(model_state_def, model_state_leaves)
             model = nnx.merge(model_def, model_state)
             memory_pools = _maybe_apply_recurrent_cow(forward_batch, memory_pools)
@@ -1094,15 +1115,8 @@ class DFlashWorker(BaseSpecWorker, BaseDraftWorker):
         from jax.sharding import NamedSharding
         from jax.sharding import PartitionSpec as P
 
-        from sgl_jax.srt.mem_cache.memory_pool import _set_fused_kv_buffer, merge_kv
-
         runner = self.draft_model_runner
-        pool = runner.token_to_kv_pool
-        page_size = pool.page_size
-        kv_part = pool.kv_partition_axis
-        data_part = pool.attention_data_partition_axis
-        mesh = pool.mesh
-        n_layers = self.draft_layers
+        mesh = runner.token_to_kv_pool.mesh
         vector_sharding = NamedSharding(mesh, P("data"))
         hidden_sharding = NamedSharding(mesh, P("data", None))
 
@@ -1112,7 +1126,8 @@ class DFlashWorker(BaseSpecWorker, BaseDraftWorker):
         @_partial(
             jax.jit,
             static_argnames=["model_state_def"],
-            donate_argnames=["kv_buffers"],
+            donate_argnames=["pool"],
+            compiler_options=getattr(runner.attn_backend, "compiler_options", None),
         )
         def draft_extend(
             model_def,
@@ -1123,7 +1138,7 @@ class DFlashWorker(BaseSpecWorker, BaseDraftWorker):
             cache_loc,
             accept_lens,
             active_mask,
-            kv_buffers,
+            pool,
         ):
             positions = jax.sharding.reshard(positions.astype(jnp.int32), vector_sharding)
             cache_loc = jax.sharding.reshard(cache_loc.astype(jnp.int32), vector_sharding)
@@ -1137,25 +1152,13 @@ class DFlashWorker(BaseSpecWorker, BaseDraftWorker):
                 active_mask,
             )
 
+            model_state_leaves = _prepare_model_state(runner, model_state_leaves)
             state = jax.tree_util.tree_unflatten(model_state_def, model_state_leaves)
             model = nnx.merge(model_def, state)
             kv_list = model.materialize_kv(target_hidden, positions)
-            new_bufs = []
-            for i in range(n_layers):
-                k, v = kv_list[i]
-                fused = merge_kv(k, v)
-                new_bufs.append(
-                    _set_fused_kv_buffer(
-                        fused,
-                        cache_loc,
-                        kv_buffers[i],
-                        page_size,
-                        kv_part,
-                        data_part,
-                        mesh,
-                    )
-                )
-            return new_bufs
+            for i, (k, v) in enumerate(kv_list):
+                pool.set_kv_buffer(pool.start_layer + i, cache_loc, k, v)
+            return pool.kv_buffer
 
         self._jit_materialize_write = _partial(draft_extend, model_def, model_state_def)
 
@@ -1214,7 +1217,7 @@ class DFlashWorker(BaseSpecWorker, BaseDraftWorker):
             cache_loc,
             accept_lens,
             active_mask,
-            list(pool.kv_buffer[: self.draft_layers]),
+            pool,
         )
         for i, buf in enumerate(new_buffers):
             pool.kv_buffer[i] = buf
@@ -1567,7 +1570,7 @@ class DFlashWorker(BaseSpecWorker, BaseDraftWorker):
                 num_tokens,
                 ForwardMode.EXTEND,
                 manager.cache_loc_buckets[-1],
-                speculative_algorithm=SpeculativeAlgorithm.DFLASH,
+                speculative_algorithm=self.algorithm,
                 dp_size=manager.dp_size,
                 per_dp_bs_size=bs // manager.dp_size,
             )
@@ -1759,7 +1762,7 @@ class DFlashWorker(BaseSpecWorker, BaseDraftWorker):
             num_tokens,
             ForwardMode.TARGET_VERIFY,
             bs * row_width,
-            speculative_algorithm=SpeculativeAlgorithm.DFLASH,
+            speculative_algorithm=self.algorithm,
             dp_size=dp_size,
             per_dp_bs_size=per_dp_bs,
         )
